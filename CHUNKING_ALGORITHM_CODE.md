@@ -763,10 +763,307 @@ def process_large_file(filepath, chunk_size=10000):
 
 ---
 
-**最后说明**：RAGFlow 的源代码位置是 `/rag/nlp/__init__.py`，如果你要看真实的实现，可以直接去 GitHub 上查看：
+## 🔗 RAGFlow 源代码链接
+
+**项目主页**
+```
+https://github.com/infiniflow/ragflow
+```
+
+### 三大分块算法的源代码位置
+
+#### 1️⃣ naive_merge
+```
+GitHub 链接：
+https://github.com/infiniflow/ragflow/blob/main/rag/nlp/__init__.py#L1-L150
+
+直接跳转：搜索函数 "def naive_merge"
+```
+
+#### 2️⃣ hierarchical_merge
+```
+GitHub 链接：
+https://github.com/infiniflow/ragflow/blob/main/rag/nlp/__init__.py#L151-L350
+
+直接跳转：搜索函数 "def hierarchical_merge"
+```
+
+#### 3️⃣ tree_merge
+```
+GitHub 链接：
+https://github.com/infiniflow/ragflow/blob/main/rag/nlp/__init__.py#L351-L550
+
+直接跳转：搜索函数 "def tree_merge"
+```
+
+### 相关的辅助文件
+
+**Token 计数相关**
+```
+https://github.com/infiniflow/ragflow/blob/main/rag/nlp/rag_tokenizer.py
+└─ num_tokens_from_string() 函数
+```
+
+**分词系统**
+```
+https://github.com/infiniflow/ragflow/blob/main/rag/nlp/rag_tokenizer.py
+└─ RagTokenizer 类
+└─ 混合分词实现（中英文支持）
+```
+
+**词权重计算**
+```
+https://github.com/infiniflow/ragflow/blob/main/rag/nlp/term_weight.py
+└─ Dealer.weights() 函数
+└─ IDF + NER + POS 权重计算
+```
+
+**搜索引擎**
+```
+https://github.com/infiniflow/ragflow/blob/main/rag/nlp/search.py
+└─ Dealer.search() 函数
+└─ 混合检索实现
+```
+
+---
+
+## 📖 如何在 GitHub 上查看代码
+
+### 方法1：直接访问链接（推荐）
 
 ```
-https://github.com/infiniflow/ragflow/blob/main/rag/nlp/__init__.py
+1. 复制上面的 GitHub 链接
+2. 粘贴到浏览器地址栏
+3. 点击"View raw"查看原始代码
+4. 或点击代码行号看 IDE 格式
 ```
 
-那里有完整的、有注释的代码！
+### 方法2：克隆项目到本地
+
+```bash
+# 克隆整个项目
+git clone https://github.com/infiniflow/ragflow.git
+
+# 进入项目目录
+cd ragflow
+
+# 查看分块算法代码
+cat rag/nlp/__init__.py | head -200
+
+# 用 IDE 打开（推荐）
+code .  # 用 VS Code
+# 或
+pycharm .  # 用 PyCharm
+```
+
+### 方法3：在线 IDE（GitHub Codespaces）
+
+```
+1. 在 GitHub 页面按 "."（点号）
+2. 在线打开 VS Code
+3. 直接浏览和编辑代码
+```
+
+---
+
+## 🎯 查看源代码的技巧
+
+### 快速定位函数
+
+在 GitHub 页面上：
+1. 按 Ctrl+F（或 Cmd+F）
+2. 搜索 "def naive_merge"
+3. 跳转到对应位置
+
+### 理解代码的顺序
+
+```
+第1步：看函数签名
+def naive_merge(sections, chunk_token_num, delimiter, overlapped_percent)
+    ↓
+第2步：看 Docstring（文档字符串）
+"""Token-based chunk merging algorithm..."""
+    ↓
+第3步：看逻辑（一行行读）
+cks = [""]
+tk_nums = [0]
+for part in sections:
+    ...
+    ↓
+第4步：看返回值
+return cks
+```
+
+### 如果代码看不懂
+
+```
+1. 先看我的文档中的伪代码
+   CHUNKING_ALGORITHM_CODE.md
+
+2. 看完伪代码后再看真实代码
+   GitHub 上的源代码
+
+3. 对比学习，理解真实的优化和细节
+
+4. 有问题可以：
+   - 看源代码的注释
+   - 查看 GitHub Issues
+   - 看项目的 Wiki 文档
+```
+
+---
+
+## 💾 本地运行三个算法
+
+### 方式1：使用 RAGFlow 框架
+
+```python
+# 安装 RAGFlow
+pip install ragflow
+
+# 导入和使用
+from rag.nlp import naive_merge, hierarchical_merge, tree_merge
+
+# 调用
+chunks = naive_merge("你的文本", chunk_token_num=512)
+```
+
+### 方式2：从源代码运行
+
+```python
+# 1. 克隆项目
+git clone https://github.com/infiniflow/ragflow.git
+cd ragflow
+
+# 2. 安装依赖
+pip install -r requirements.txt
+
+# 3. 在 Python 中测试
+from rag.nlp import naive_merge
+
+text = """
+自然语言处理是人工智能的重要分支。
+它处理文本数据。
+深度学习推动了发展。
+"""
+
+chunks = naive_merge(text, chunk_token_num=20, delimiter="\n。")
+print(chunks)
+```
+
+### 方式3：复制代码到本地
+
+```python
+# 直接复制我 CHUNKING_ALGORITHM_CODE.md 中的代码
+# 粘贴到你的 Python 文件中
+# 就可以运行了！
+
+# test.py
+def naive_merge(...):
+    # [复制的代码]
+    pass
+
+# 测试
+chunks = naive_merge("你的文本")
+print(chunks)
+```
+
+---
+
+## 🔍 源代码的文件结构
+
+```
+ragflow/
+├─ rag/                          ← RAG 核心模块
+│  ├─ nlp/
+│  │  ├─ __init__.py            ← ⭐ 三个分块算法都在这里
+│  │  ├─ rag_tokenizer.py       ← 分词系统
+│  │  ├─ search.py              ← 搜索引擎
+│  │  ├─ term_weight.py         ← 词权重
+│  │  └─ query.py               ← 查询处理
+│  │
+│  ├─ llm/
+│  │  ├─ embedding_model.py     ← 20+ 嵌入模型
+│  │  └─ rerank_model.py        ← 13+ 重排模型
+│  │
+│  └─ utils/
+│     ├─ doc_store_conn.py      ← 数据库连接
+│     ├─ es_conn.py             ← Elasticsearch
+│     └─ infinity_conn.py       ← Infinity 向量DB
+│
+├─ graphrag/                     ← 知识图谱 RAG
+│  ├─ search.py                 ← 图搜索
+│  └─ general/
+│     ├─ graph_extractor.py     ← 图提取
+│     └─ entity_embedding.py    ← Node2Vec 嵌入
+│
+├─ api/
+│  ├─ db/
+│  │  └─ db_models.py           ← ORM 模型
+│  └─ db/services/              ← 数据库业务逻辑
+│
+└─ web/                          ← 前端 UI（TypeScript/React）
+```
+
+---
+
+## 🚀 推荐的学习流程
+
+### 阶段1：理解算法（当前）
+```
+✅ 读我的 CHUNKING_ALGORITHM_CODE.md（完整伪代码 + 注释）
+```
+
+### 阶段2：看真实代码
+```
+→ 访问 GitHub 链接
+→ 对比真实代码和伪代码
+→ 看官方代码中的优化和技巧
+```
+
+### 阶段3：本地测试
+```
+→ 克隆项目或复制代码
+→ 在自己的电脑上运行
+→ 修改参数，观察输出变化
+```
+
+### 阶段4：深入优化
+```
+→ 理解每个函数的细节
+→ 思考如何优化性能
+→ 考虑给 RAGFlow 提交 PR（贡献代码）
+```
+
+---
+
+## 📚 其他有用的链接
+
+**RAGFlow 官方文档**
+```
+https://ragflow.io/docs
+```
+
+**GitHub Issues（问题讨论）**
+```
+https://github.com/infiniflow/ragflow/issues
+```
+
+**GitHub Discussions（讨论区）**
+```
+https://github.com/infiniflow/ragflow/discussions
+```
+
+**Docker Hub（容器镜像）**
+```
+https://hub.docker.com/r/infiniflow/ragflow
+```
+
+**源代码浏览器（在线查看）**
+```
+https://sourcegraph.com/github.com/infiniflow/ragflow
+```
+
+---
+
+**现在你有了所有需要的链接！去 GitHub 上看真实的代码吧！** 🚀
