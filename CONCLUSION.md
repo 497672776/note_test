@@ -5611,6 +5611,732 @@ api/ (Flask API)
 
 ---
 
+## 🔐 Admin 模块：系统管理和用户管理
+
+Admin 模块是 RAGFlow 的管理后台，负责用户、角色、权限和系统服务的管理。分为两部分：
+
+### 📂 结构
+
+```
+admin/
+├── server/              # Python Flask 后端服务
+│   ├── routes.py       # API 路由（22+ 个端点）
+│   ├── auth.py         # 认证和登录
+│   ├── services.py     # 业务逻辑
+│   ├── roles.py        # 角色权限管理
+│   └── admin_server.py # 服务启动入口
+│
+└── client/             # 命令行客户端
+    ├── admin_client.py # CLI 实现
+    └── README.md       # CLI 使用文档
+```
+
+---
+
+### 🔌 Admin Server API 完全手册
+
+#### 🔐 认证相关
+
+**1. 登录**
+```
+POST /api/v1/admin/login
+
+请求：
+{
+  "email": "admin@ragflow.io",
+  "password": "admin"
+}
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "id": "user_123",
+    "email": "admin@ragflow.io",
+    "is_superuser": true
+  },
+  "auth": "<access_token>"  # 保存这个 token，后续请求需要用
+}
+```
+
+**2. 验证认证状态**
+```
+GET /api/v1/admin/auth
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "message": "Admin is authorized"
+}
+```
+
+**3. 登出**
+```
+GET /api/v1/admin/logout
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": true
+}
+```
+
+---
+
+#### 👥 用户管理 API
+
+**1. 列出所有用户**
+```
+GET /api/v1/admin/users
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": [
+    {
+      "email": "alice@company.com",
+      "nickname": "Alice",
+      "create_date": "2025-11-02",
+      "is_active": 1,      # 1=激活, 0=停用
+      "is_superuser": false
+    },
+    ...
+  ]
+}
+```
+
+**2. 创建用户**
+```
+POST /api/v1/admin/users
+Header: Authorization: <access_token>
+Content-Type: application/json
+
+请求：
+{
+  "username": "newuser@example.com",  # 必须是邮箱格式！
+  "password": "encrypted_password",
+  "role": "user"  # "user" 或 "admin"
+}
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "id": "user_new_123",
+    "email": "newuser@example.com",
+    "nickname": ""  # 用户需要自己在设置中修改
+  },
+  "message": "User created successfully"
+}
+```
+
+**3. 获取用户详情**
+```
+GET /api/v1/admin/users/<email>
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": [
+    {
+      "email": "alice@company.com",
+      "language": "Chinese",
+      "last_login_time": "2025-11-02 10:00:00",
+      "is_active": 1,
+      "is_superuser": false,
+      "create_date": "2025-11-02",
+      "update_date": "2025-11-02"
+    }
+  ]
+}
+```
+
+**4. 修改用户密码**
+```
+PUT /api/v1/admin/users/<email>/password
+Header: Authorization: <access_token>
+Content-Type: application/json
+
+请求：
+{
+  "new_password": "encrypted_new_password"
+}
+
+响应：
+{
+  "code": 0,
+  "message": "Password updated successfully"
+}
+```
+
+**5. 修改用户激活状态**
+```
+PUT /api/v1/admin/users/<email>/activate
+Header: Authorization: <access_token>
+Content-Type: application/json
+
+请求：
+{
+  "activate_status": 1  # 1=激活, 0=停用
+}
+
+响应：
+{
+  "code": 0,
+  "message": "User activated/deactivated"
+}
+```
+
+**6. 删除用户（包括其所有数据）**
+```
+DELETE /api/v1/admin/users/<email>
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "message": "User deleted successfully"
+}
+```
+
+---
+
+#### 📊 用户资源相关 API
+
+**1. 获取用户的所有知识库**
+```
+GET /api/v1/admin/users/<email>/datasets
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": [
+    {
+      "id": "kb_123",
+      "name": "产品手册",
+      "doc_num": 15,
+      "chunk_num": 1200,
+      "token_num": 50000
+    },
+    ...
+  ]
+}
+```
+
+**2. 获取用户的所有 Agent/对话应用**
+```
+GET /api/v1/admin/users/<email>/agents
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": [
+    {
+      "id": "dialog_123",
+      "name": "产品咨询机器人",
+      "type": "dialog",
+      "create_date": "2025-11-02"
+    },
+    ...
+  ]
+}
+```
+
+---
+
+#### 🔧 服务管理 API
+
+**1. 列出所有服务**
+```
+GET /api/v1/admin/services
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": [
+    {
+      "id": 0,
+      "name": "ragflow_0",
+      "service_type": "ragflow_server",
+      "host": "0.0.0.0",
+      "port": 9380,
+      "extra": {}
+    },
+    {
+      "id": 1,
+      "name": "mysql",
+      "service_type": "meta_data",
+      "host": "localhost",
+      "port": 5455,
+      "extra": {
+        "meta_type": "mysql",
+        "username": "root"
+      }
+    },
+    {
+      "id": 2,
+      "name": "minio",
+      "service_type": "file_store",
+      "host": "localhost",
+      "port": 9000,
+      "extra": {
+        "store_type": "minio",
+        "user": "rag_flow"
+      }
+    },
+    {
+      "id": 3,
+      "name": "elasticsearch",
+      "service_type": "retrieval",
+      "host": "localhost",
+      "port": 1200,
+      "extra": {
+        "retrieval_type": "elasticsearch"
+      }
+    },
+    {
+      "id": 5,
+      "name": "redis",
+      "service_type": "message_queue",
+      "host": "localhost",
+      "port": 6379,
+      "extra": {
+        "mq_type": "redis"
+      }
+    }
+  ]
+}
+```
+
+**2. 按类型获取服务**
+```
+GET /api/v1/admin/service_types/<service_type>
+Header: Authorization: <access_token>
+
+支持的 service_type：
+- ragflow_server      (RAGFlow 主服务)
+- meta_data          (PostgreSQL/MySQL)
+- file_store         (MinIO/S3)
+- retrieval          (Elasticsearch/OpenSearch/Infinity)
+- message_queue      (Redis)
+
+响应：
+{
+  "code": 0,
+  "data": [
+    {
+      "id": 1,
+      "name": "mysql",
+      "service_type": "meta_data",
+      ...
+    }
+  ]
+}
+```
+
+**3. 获取服务详情（包括健康状态）**
+```
+GET /api/v1/admin/services/<service_id>
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "id": 0,
+    "name": "ragflow_0",
+    "service_type": "ragflow_server",
+    "host": "0.0.0.0",
+    "port": 9380,
+    "status": "healthy",     # 健康状态
+    "uptime": 3600,          # 运行时间（秒）
+    "cpu_usage": 15.2,       # CPU 使用率 (%)
+    "memory_usage": 1024     # 内存使用 (MB)
+  }
+}
+```
+
+**4. 重启服务**
+```
+PUT /api/v1/admin/services/<service_id>
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "id": 0,
+    "name": "ragflow_0",
+    "status": "restarted"
+  }
+}
+```
+
+**5. 关闭服务**
+```
+DELETE /api/v1/admin/services/<service_id>
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "id": 0,
+    "name": "ragflow_0",
+    "status": "stopped"
+  }
+}
+```
+
+---
+
+#### 🛡️ 角色和权限管理 API
+
+**1. 创建角色**
+```
+POST /api/v1/admin/roles
+Header: Authorization: <access_token>
+
+请求：
+{
+  "role_name": "editor",
+  "description": "Can edit documents and create agents"
+}
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "role_name": "editor",
+    "description": "Can edit documents and create agents"
+  }
+}
+```
+
+**2. 列出所有角色**
+```
+GET /api/v1/admin/roles
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": [
+    {
+      "role_name": "admin",
+      "description": "Administrator with full permissions"
+    },
+    {
+      "role_name": "user",
+      "description": "Regular user with basic permissions"
+    },
+    {
+      "role_name": "editor",
+      "description": "Can edit documents and create agents"
+    }
+  ]
+}
+```
+
+**3. 获取角色权限**
+```
+GET /api/v1/admin/roles/<role_name>/permission
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "role_name": "editor",
+    "permissions": [
+      {
+        "resource": "document",
+        "actions": ["read", "write"]
+      },
+      {
+        "resource": "knowledgebase",
+        "actions": ["read"]
+      }
+    ]
+  }
+}
+```
+
+**4. 给角色授予权限**
+```
+POST /api/v1/admin/roles/<role_name>/permission
+Header: Authorization: <access_token>
+
+请求：
+{
+  "resource": "document",
+  "actions": ["read", "write", "delete"]
+}
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "role_name": "editor",
+    "resource": "document",
+    "actions": ["read", "write", "delete"]
+  }
+}
+```
+
+**5. 撤销角色权限**
+```
+DELETE /api/v1/admin/roles/<role_name>/permission
+Header: Authorization: <access_token>
+
+请求：
+{
+  "resource": "document",
+  "actions": ["delete"]
+}
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "message": "Permission revoked successfully"
+  }
+}
+```
+
+**6. 修改角色描述**
+```
+PUT /api/v1/admin/roles/<role_name>
+Header: Authorization: <access_token>
+
+请求：
+{
+  "description": "Updated description"
+}
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "role_name": "editor",
+    "description": "Updated description"
+  }
+}
+```
+
+**7. 删除角色**
+```
+DELETE /api/v1/admin/roles/<role_name>
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "message": "Role deleted successfully"
+  }
+}
+```
+
+---
+
+#### 🧑‍🤝‍🧑 用户角色管理 API
+
+**1. 修改用户角色**
+```
+PUT /api/v1/admin/users/<email>/role
+Header: Authorization: <access_token>
+
+请求：
+{
+  "role_name": "editor"
+}
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "email": "alice@company.com",
+    "role_name": "editor"
+  }
+}
+```
+
+**2. 获取用户的所有权限**
+```
+GET /api/v1/admin/users/<email>/permission
+Header: Authorization: <access_token>
+
+响应：
+{
+  "code": 0,
+  "data": {
+    "email": "alice@company.com",
+    "role_name": "editor",
+    "permissions": [
+      {
+        "resource": "document",
+        "actions": ["read", "write"]
+      },
+      {
+        "resource": "knowledgebase",
+        "actions": ["read"]
+      }
+    ]
+  }
+}
+```
+
+---
+
+### ⌨️ Admin CLI（命令行工具）
+
+#### 安装和启动
+
+```bash
+# 1. 安装 CLI
+pip install ragflow-cli==0.21.1
+
+# 2. 启动 CLI（连接到 Admin Server）
+ragflow-cli -h 127.0.0.1 -p 9381
+
+# 输入 admin 密码
+Enter admin password: admin
+```
+
+#### CLI 支持的命令
+
+**服务管理：**
+```bash
+admin> list services;
+admin> show service 0;
+```
+
+**用户管理：**
+```bash
+admin> list users;
+admin> show user 'alice@company.com';
+admin> create user 'newuser@example.com' 'password123';
+admin> drop user 'alice@company.com';
+admin> alter user password 'alice@company.com' 'newpassword';
+admin> alter user active alice@company.com on;    # 激活用户
+admin> alter user active alice@company.com off;   # 停用用户
+```
+
+**数据和应用：**
+```bash
+admin> list datasets of 'alice@company.com';
+admin> list agents of 'alice@company.com';
+```
+
+**帮助和退出：**
+```bash
+admin> \?
+admin> \help
+admin> \q
+admin> \quit
+```
+
+#### 命令执行示例
+
+```
+admin> list users;
++-------------------------------+------------------------+-----------+-------------+
+| create_date                   | email                  | is_active | nickname    |
++-------------------------------+------------------------+-----------+-------------+
+| Fri, 22 Nov 2024 16:03:41 GMT | admin@ragflow.io       | 1         | Admin       |
+| Fri, 22 Nov 2024 16:10:55 GMT | alice@company.com      | 1         | Alice       |
++-------------------------------+------------------------+-----------+-------------+
+
+admin> list services;
++---------------------------+--------+----+---------------+-------+----------------+
+| extra                     | host   | id | name          | port  | service_type   |
++---------------------------+--------+----+---------------+-------+----------------+
+| {}                        | 0.0.0.0| 0  | ragflow_0     | 9380  | ragflow_server |
+| {'meta_type': 'mysql'...} | local  | 1  | mysql         | 5455  | meta_data      |
+| {'store_type': 'minio'..} | local  | 2  | minio         | 9000  | file_store     |
+| {'retrieval_type': 'es'..}| local  | 3  | elasticsearch | 1200  | retrieval      |
+| {'mq_type': 'redis'...}   | local  | 5  | redis         | 6379  | message_queue  |
++---------------------------+--------+----+---------------+-------+----------------+
+```
+
+---
+
+### 📊 API 端点汇总表
+
+| 功能 | HTTP 方法 | 端点 | 描述 |
+|------|----------|------|------|
+| 登录 | POST | /api/v1/admin/login | 管理员登录获取 token |
+| 验证认证 | GET | /api/v1/admin/auth | 验证 token 是否有效 |
+| 登出 | GET | /api/v1/admin/logout | 注销 token |
+| **用户管理** | | | |
+| 列出用户 | GET | /api/v1/admin/users | 获取所有用户列表 |
+| 创建用户 | POST | /api/v1/admin/users | 创建新用户 |
+| 获取用户详情 | GET | /api/v1/admin/users/<email> | 获取单个用户详情 |
+| 修改密码 | PUT | /api/v1/admin/users/<email>/password | 修改用户密码 |
+| 修改激活状态 | PUT | /api/v1/admin/users/<email>/activate | 激活/停用用户 |
+| 删除用户 | DELETE | /api/v1/admin/users/<email> | 删除用户及其所有数据 |
+| 获取用户知识库 | GET | /api/v1/admin/users/<email>/datasets | 获取用户的知识库列表 |
+| 获取用户 Agent | GET | /api/v1/admin/users/<email>/agents | 获取用户的 Agent 列表 |
+| **服务管理** | | | |
+| 列出服务 | GET | /api/v1/admin/services | 获取所有服务 |
+| 按类型获取 | GET | /api/v1/admin/service_types/<type> | 按类型筛选服务 |
+| 获取服务详情 | GET | /api/v1/admin/services/<id> | 获取服务详细信息 |
+| 重启服务 | PUT | /api/v1/admin/services/<id> | 重启指定服务 |
+| 关闭服务 | DELETE | /api/v1/admin/services/<id> | 关闭指定服务 |
+| **角色权限** | | | |
+| 创建角色 | POST | /api/v1/admin/roles | 创建新角色 |
+| 列出角色 | GET | /api/v1/admin/roles | 获取所有角色 |
+| 修改角色 | PUT | /api/v1/admin/roles/<name> | 修改角色描述 |
+| 删除角色 | DELETE | /api/v1/admin/roles/<name> | 删除角色 |
+| 获取角色权限 | GET | /api/v1/admin/roles/<name>/permission | 查看角色权限 |
+| 授予权限 | POST | /api/v1/admin/roles/<name>/permission | 给角色分配权限 |
+| 撤销权限 | DELETE | /api/v1/admin/roles/<name>/permission | 撤销角色权限 |
+| **用户角色** | | | |
+| 修改用户角色 | PUT | /api/v1/admin/users/<email>/role | 修改用户的角色 |
+| 获取用户权限 | GET | /api/v1/admin/users/<email>/permission | 获取用户的所有权限 |
+
+---
+
+### 💡 使用场景
+
+**场景 1：添加新的团队成员**
+```
+1. 管理员登录 Admin Server
+2. POST /api/v1/admin/users 创建新用户
+3. PUT /api/v1/admin/users/<email>/role 分配角色
+4. 新用户可以登录 RAGFlow
+```
+
+**场景 2：监控系统健康**
+```
+1. 定时 GET /api/v1/admin/services
+2. 检查每个服务的 status
+3. 如果服务不健康，自动 PUT 重启
+```
+
+**场景 3：管理权限**
+```
+1. POST /api/v1/admin/roles 创建角色（如"编辑"）
+2. POST /api/v1/admin/roles/<name>/permission 授予权限
+3. PUT /api/v1/admin/users/<email>/role 分配用户到角色
+```
+
+**场景 4：删除用户及其所有数据**
+```
+1. GET /api/v1/admin/users/<email>/datasets 查看用户的知识库
+2. DELETE /api/v1/admin/users/<email> 删除用户（自动删除所有关联数据）
+```
+
+---
+
 ## 🎯 一句话总结
 
 **RAGFlow = 帮你把海量文档变成一个聪明的 AI 助手的框架**
