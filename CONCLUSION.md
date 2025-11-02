@@ -2459,6 +2459,337 @@ Web：Flask（API）
 
 ---
 
+## 🔄 重排模型完全指南：API vs 本地部署
+
+### "这些都是用的API吗？"
+
+**简短回答**：不都是。RAGFlow 支持 17+ 个重排模型，其中有 **API 型**、**本地部署型**、以及**两种混合型**。选择哪种取决于你的需求。
+
+### 📊 完整对比表
+
+| 模型名称 | 类型 | 部署方式 | 认证方式 | 代码位置 |
+|---------|------|--------|--------|---------|
+| **Jina Reranker** | API | 云服务 | Bearer Token | rerank_model.py:40 |
+| **Cohere Reranker** | API | 云服务 | API Key (SDK) | rerank_model.py:231 |
+| **NVIDIA Rerank** | API | 云服务 | Bearer Token | rerank_model.py:137 |
+| **Voyage AI** | API | 云服务 | API Key (SDK) | rerank_model.py:333 |
+| **Qwen Reranker** | API | 云服务 | API Key (DashScope SDK) | rerank_model.py:356 |
+| **Baidu YiYan** | API | 云服务 | AK/SK 密钥对 | rerank_model.py:305 |
+| **SiliconFlow** | API | 云服务 | Bearer Token | rerank_model.py:268 |
+| **Novita AI** | API | 云服务 | Bearer Token | rerank_model.py:467 |
+| **Gitee AI** | API | 云服务 | Bearer Token | rerank_model.py:476 |
+| **302.AI** | API | 云服务 | Bearer Token | rerank_model.py:485 |
+| **HuggingFace** | 本地 | HTTP 服务器 | 无认证 | rerank_model.py:383 |
+| **LocalAI** | 本地 | HTTP 服务器 | Bearer Token (可选) | rerank_model.py:93 |
+| **Xinference** | 可配置 | 本地/云服务 | Bearer Token (可选) | rerank_model.py:61 |
+| **GPUStack** | 可配置 | 本地/云服务 | Bearer Token | rerank_model.py:419 |
+| **OpenAI-Compatible** | 可配置 | 本地/云服务 | Bearer Token | rerank_model.py:187 |
+| **LM-Studio** | 本地 | ❌ 未实现 | N/A | rerank_model.py:177 |
+| **TogetherAI** | API | ❌ 未实现 | N/A | rerank_model.py:258 |
+
+### 🔌 三种部署模式详解
+
+#### 模式 1：API 型（最简单，云服务）
+
+**特点**：
+- 不需要本地 GPU
+- 按调用次数付费
+- 厂商负责维护和更新
+- 需要网络连接
+
+**代码示例** - Jina 重排：
+```python
+# /home/liudecheng/rag_flow_test/ragflow/rag/llm/rerank_model.py:40-58
+class JinaRerank(Base):
+    def __init__(self, key, model_name="jina-reranker-v2-base-multilingual",
+                 base_url="https://api.jina.ai/v1/rerank"):
+        self.base_url = "https://api.jina.ai/v1/rerank"
+        self.headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+        self.model_name = model_name
+
+    def similarity(self, query: str, texts: list):
+        # 直接调用远程 API
+        data = {"model": self.model_name, "query": query, "documents": texts, "top_n": len(texts)}
+        res = requests.post(self.base_url, headers=self.headers, json=data).json()
+        # 解析返回结果
+        rank = np.zeros(len(texts), dtype=float)
+        for d in res["results"]:
+            rank[d["index"]] = d["relevance_score"]
+        return rank, total_token_count_from_response(res)
+```
+
+**使用场景**：
+- 中小企业（不想维护服务器）
+- 临时任务或原型验证
+- 需要多种模型选择的灵活性
+
+**成本估算**：
+```
+Jina: ~¥0.01-0.1/1000 tokens
+Cohere: ~¥0.05/1000 tokens
+NVIDIA: 免费（需要注册）
+```
+
+---
+
+#### 模式 2：本地部署型（需要 GPU，完全隐私）
+
+**特点**：
+- 需要自己的 GPU 服务器
+- 零网络延迟
+- 100% 数据隐私
+- 前期部署复杂
+
+**代码示例** - HuggingFace 本地重排：
+```python
+# /home/liudecheng/rag_flow_test/ragflow/rag/llm/rerank_model.py:383-416
+class HuggingfaceRerank(Base):
+    def __init__(self, key, model_name="BAAI/bge-reranker-v2-m3",
+                 base_url="http://127.0.0.1"):
+        self.model_name = model_name.split("___")[0]
+        self.base_url = base_url  # 本地 HTTP 服务器地址
+
+    def similarity(self, query: str, texts: list) -> tuple[np.ndarray, int]:
+        # 调用本地 HTTP 服务器（需要单独部署）
+        # 例：docker run -p 8080:8080 -e MODEL_NAME=BAAI/bge-reranker-v2-m3 ...
+        token_count = sum([num_tokens_from_string(t) for t in texts])
+        return HuggingfaceRerank.post(query, texts, self.base_url), token_count
+
+    @staticmethod
+    def post(query: str, texts: list, url="127.0.0.1"):
+        # 按批处理（8 个文本一批）
+        batch_size = 8
+        for i in range(0, len(texts), batch_size):
+            res = requests.post(
+                f"http://{url}/rerank",  # ← 本地 HTTP 端点
+                json={"query": query, "texts": texts[i : i + batch_size], "raw_scores": False}
+            )
+```
+
+**使用场景**：
+- 大规模企业（隐私要求高）
+- 高频率检索（API 成本太高）
+- 已有 GPU 服务器基础设施
+
+**部署步骤**：
+```bash
+# 1. 拉取 HuggingFace 模型
+docker pull huggingface/text-embeddings-inference:latest
+
+# 2. 启动服务器
+docker run -p 8000:80 \
+  -e MODEL_NAME=BAAI/bge-reranker-v2-m3 \
+  -e HF_API_TOKEN=your_token \
+  huggingface/text-embeddings-inference:latest
+
+# 3. 在 RAGFlow 配置中使用
+# 重排模型配置：http://127.0.0.1:8000
+```
+
+---
+
+#### 模式 3：可配置型（灵活选择 API 或本地）
+
+**特点**：
+- 支持自定义 base_url
+- 可以连接 API 或本地服务器
+- 同一代码支持多种部署方式
+
+**代码示例** - Xinference 可配置重排：
+```python
+# /home/liudecheng/rag_flow_test/ragflow/rag/llm/rerank_model.py:61-90
+class XInferenceRerank(Base):
+    def __init__(self, key="x", model_name="", base_url=""):
+        # base_url 可以是：
+        # 1. 本地：http://127.0.0.1:9997
+        # 2. 远程：https://xinference.company.com
+        if base_url.find("/v1") == -1:
+            base_url = urljoin(base_url, "/v1/rerank")
+        self.base_url = base_url
+
+    def similarity(self, query: str, texts: list):
+        data = {"model": self.model_name, "query": query, "return_documents": "true",
+                "return_len": "true", "documents": texts}
+        # 根据 base_url 自动路由到本地或远程
+        res = requests.post(self.base_url, headers=self.headers, json=data).json()
+        rank = np.zeros(len(texts), dtype=float)
+        for d in res["results"]:
+            rank[d["index"]] = d["relevance_score"]
+        return rank, token_count
+```
+
+**使用场景**：
+```
+开发环境 → 使用本地: http://127.0.0.1:9997
+测试环境 → 使用云服务: https://xinference.api.com
+生产环境 → 使用客户自有服务器
+（只需改 base_url 参数，代码零改动）
+```
+
+---
+
+### 💰 成本与性能对比
+
+```
+┌──────────────────┬─────────────┬─────────┬──────────┬──────────┐
+│ 模型类型         │ 部署成本    │ 运行成本│ 延迟     │ 隐私性   │
+├──────────────────┼─────────────┼─────────┼──────────┼──────────┤
+│ API 型           │ 0           │ ¥$      │ 中等     │ 低       │
+│ 本地部署型       │ ¥¥¥         │ 0       │ 很低     │ 很高     │
+│ 可配置型         │ 灵活        │ 灵活    │ 灵活     │ 灵活     │
+└──────────────────┴─────────────┴─────────┴──────────┴──────────┘
+
+每个 ¥ 表示成本增加
+```
+
+---
+
+### 🎯 如何选择？（决策树）
+
+```
+你有高隐私要求吗？
+├─ 是 → 选择本地部署型（HuggingFace、LocalAI）
+└─ 否 → 你有 GPU 吗？
+    ├─ 没有 → 选择 API 型（Jina、Cohere、NVIDIA）
+    └─ 有 → 选择哪个更便宜？
+        ├─ API 成本 < GPU 成本 → 选择 API 型
+        └─ GPU 更便宜 → 选择本地部署型
+
+你想灵活切换吗？
+└─ 是 → 选择可配置型（Xinference、GPUStack、OpenAI-Compatible）
+```
+
+---
+
+### 🔧 RAGFlow 中的配置示例
+
+**API 型配置**（以 Cohere 为例）：
+```python
+# 配置文件或环境变量
+RERANK_MODEL = "Cohere/rerank-english-v2.0"
+RERANK_KEY = "your_cohere_api_key"
+# 代码会自动调用：CoHereRerank(key, model_name)
+# 内部会使用 Client(api_key=key).rerank()
+```
+
+**本地部署配置**（以 HuggingFace 为例）：
+```python
+RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+RERANK_BASE_URL = "http://your-server:8000"
+# 代码会自动调用：HuggingfaceRerank.post(query, texts, base_url)
+```
+
+**可配置型配置**（以 Xinference 为例）：
+```python
+RERANK_MODEL = "qwen/qwen-rerank"
+RERANK_BASE_URL = "http://127.0.0.1:9997"  # 改这一行就能切换环境
+RERANK_KEY = "optional_token"
+```
+
+---
+
+### 📈 真实场景案例
+
+**场景 1：初创公司**
+```
+✓ 选择：API 型（Jina）
+理由：
+  - 无需维护服务器（节省运维成本）
+  - 按需付费（初期用量小，成本低）
+  - 快速部署（1 天上线）
+  - 弹性扩展（自动扩容，无需担心）
+
+成本：¥0.01-0.1/1000 tokens
+```
+
+**场景 2：大企业内部系统**
+```
+✓ 选择：本地部署型（HuggingFace）
+理由：
+  - 隐私要求极高（不能上云）
+  - 查询频繁（API 成本高，自建更便宜）
+  - 已有 GPU 集群（HPC、AI 平台）
+  - 响应时间要求低（<100ms）
+
+成本：一次性 GPU 购置，无查询成本
+```
+
+**场景 3：中等规模 SaaS 平台**
+```
+✓ 选择：可配置型（OpenAI-Compatible）
+理由：
+  - 用户多样化：有些用户有自己的模型服务
+  - 灵活部署：既支持 API，也支持用户自建
+  - 成本优化：API + 本地自由组合
+  - 升级方便：只需改配置，代码不改
+
+配置示例：
+  用户 A → API 型（按量付费）
+  用户 B → 本地（用户自己的服务器）
+  用户 C → 混合型（某些任务 API，某些任务本地）
+```
+
+---
+
+### ⚠️ 常见坑与避免方法
+
+| 坑位 | 现象 | 原因 | 解决办法 |
+|-----|------|------|--------|
+| API 超时 | "Connection timeout" | 网络不稳定 | 添加重试机制、本地缓存 |
+| 成本爆炸 | 月费 ¥10,000+ | 没优化查询量 | 添加预筛选、合并查询、缓存 |
+| 隐私泄露 | 数据被上传到云端 | 选错了模型类型 | 用本地部署型 |
+| 本地 OOM | "CUDA out of memory" | 模型太大、批量太大 | 减少 batch_size（见代码第 390 行） |
+| 模型不兼容 | "Model not found" | base_url 或模型名错误 | 检查服务器部署状态 |
+
+---
+
+### 🚀 快速开始模板
+
+**最简单（API 型，Jina）**：
+```python
+from rag.llm.rerank_model import JinaRerank
+
+reranker = JinaRerank(
+    key="jina_api_key",  # 从 https://api.jina.ai 获取
+    model_name="jina-reranker-v2-base-multilingual"
+)
+
+# 使用
+query = "什么是 RAG？"
+texts = ["RAG 是...", "机器学习是...", "AI 是..."]
+scores, token_count = reranker.similarity(query, texts)
+# scores: [0.95, 0.3, 0.2]  → 第一个文本最相关
+```
+
+**最灵活（可配置型，OpenAI-Compatible）**：
+```python
+from rag.llm.rerank_model import OpenAI_APIRerank
+
+# 可以连接到任何 OpenAI 兼容的端点
+reranker = OpenAI_APIRerank(
+    key="api_key",
+    model_name="text-rerank-v1",
+    base_url="http://your-server:8000"  # 或 "https://api.openai.com"
+)
+
+scores, token_count = reranker.similarity(query, texts)
+```
+
+**最隐私（本地部署型，HuggingFace）**：
+```python
+from rag.llm.rerank_model import HuggingfaceRerank
+
+reranker = HuggingfaceRerank(
+    key="unused",  # 本地不需要
+    model_name="BAAI/bge-reranker-v2-m3",
+    base_url="http://127.0.0.1:8000"  # 本地服务器
+)
+
+scores, token_count = reranker.similarity(query, texts)
+```
+
+---
+
 ## 🎯 一句话总结
 
 **RAGFlow = 帮你把海量文档变成一个聪明的 AI 助手的框架**
