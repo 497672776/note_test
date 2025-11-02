@@ -4842,6 +4842,338 @@ client.fget_object(
 
 ---
 
+### 🗄️ PostgreSQL：重要的结构化数据都在这里
+
+现在让我们具体看看 PostgreSQL 中到底存什么数据。这里的所有表都定义在 RAGFlow 的 `/api/db/db_models.py` 中。
+
+#### 📌 5 个核心数据表
+
+**1️⃣ User 表（用户）**
+
+```python
+# /api/db/db_models.py - class User
+
+字段：
+  id              # 用户唯一ID
+  nickname        # 昵称
+  email           # 邮箱
+  password        # 密码（哈希加密）
+  avatar          # 头像 base64
+  language        # 语言（中/英）
+  timezone        # 时区
+  last_login_time # 上次登录时间
+  is_authenticated# 是否认证
+  is_active       # 是否激活
+  is_superuser    # 是否管理员
+
+现实例子：
+  id: "user_123"
+  email: "alice@company.com"
+  nickname: "Alice"
+  password: "$2b$12$..." (哈希)
+  last_login_time: 2025-11-02 10:00:00
+  is_superuser: False
+```
+
+**为什么存 PostgreSQL？**
+- 每次登录都要 **快速查询** 验证身份
+- 需要 **事务保证**（同时登录不能出现问题）
+- 需要 **加密密码**（PostgreSQL 有完整的安全机制）
+
+❌ **为什么不存 MinIO？**
+- MinIO 没有"查找"功能，只能 GET/PUT 整个文件
+- 无法做密码验证（快速对比）
+
+---
+
+**2️⃣ Knowledgebase 表（知识库配置）**
+
+```python
+# /api/db/db_models.py - class Knowledgebase
+
+字段：
+  id                          # 知识库ID
+  tenant_id                   # 所属租户
+  name                        # 知识库名字
+  description                 # 描述
+  embd_id                     # 使用的 embedding 模型
+  permission                  # 权限级别（"me" 或 "team"）
+  doc_num                     # 文档数量
+  token_num                   # 总 token 数
+  chunk_num                   # 总 chunk 数
+  similarity_threshold        # 相似度阈值（0.2）
+  vector_similarity_weight    # 向量权重（0.3）
+
+现实例子：
+  id: "kb_001"
+  name: "2025年产品手册"
+  embd_id: "BAAI/bge-large"
+  doc_num: 15              # 15个PDF
+  token_num: 50000         # 总共5万token
+  chunk_num: 1200          # 1200个chunks
+  similarity_threshold: 0.2
+  vector_similarity_weight: 0.3
+  permission: "team"       # 团队可见
+```
+
+**为什么存 PostgreSQL？**
+- 这些是 **元数据**（关于数据的数据）
+- 用户经常 **查询和修改**（改权限、改 embedding 模型）
+- token_num 用于 **费用计算**（算错就收错钱！）
+- 需要 **准确的一致性**
+
+❌ **为什么不存 MinIO？**
+- 这些数据很小（都是数字和字符串）
+- 需要经常 UPDATE（改配置）
+- MinIO 不支持 SQL 查询
+
+---
+
+**3️⃣ Document 表（文档元信息）**
+
+```python
+# /api/db/db_models.py - class Document
+
+字段：
+  id                  # 文档ID
+  kb_id               # 属于哪个知识库
+  name                # 文件名
+  type                # 文件类型（pdf, docx, xlsx）
+  size                # 文件大小（字节数）
+  location            # 在 MinIO 中的位置
+  created_by          # 谁上传的
+  process_begin_at    # 开始处理时间
+  process_duration    # 处理耗时（秒）
+  progress            # 处理进度（0.0-1.0）
+  progress_msg        # 进度消息
+  token_num           # 这个文档有多少 token
+  chunk_num           # 这个文档有多少 chunk
+  status              # 状态（处理中/成功/失败）
+
+现实例子：
+  id: "doc_001"
+  name: "product_manual.pdf"
+  type: "pdf"
+  size: 52428800        # 52MB
+  location: "documents/original/doc_001.pdf"  ← MinIO 路径
+  created_by: "user_123"
+  process_begin_at: 2025-11-02 10:00:00
+  process_duration: 45.3     # 处理了45秒
+  progress: 1.0              # 100%完成
+  token_num: 150000          # 15万token
+  chunk_num: 1800            # 1800个chunks
+  status: "1"                # 1=成功
+```
+
+**为什么存 PostgreSQL？**
+- 这些是 **文件的元信息**
+- 用户经常查询 "**我上传了多少文件？**"
+- 需要 **快速统计**（doc_num, token_num）
+- 需要 **事务保证**（上传时不能"既成功又失败"）
+
+❌ **为什么不存 MinIO？**
+- location 字段是 **指针**，指向 MinIO 中的文件
+- 需要 WHERE 查询：`SELECT * FROM document WHERE status='处理中'`
+- MinIO 没有这种能力
+
+---
+
+**4️⃣ Dialog 表（对话应用配置）**
+
+```python
+# /api/db/db_models.py - class Dialog
+
+字段：
+  id                          # 对话应用ID
+  tenant_id                   # 属于哪个租户
+  name                        # 应用名字
+  description                 # 描述
+  llm_id                      # 使用的LLM模型
+  llm_setting                 # LLM配置（JSON）
+  prompt_config               # 系统提示词（JSON）
+  kb_ids                      # 关联的知识库列表
+  top_k                       # 搜索返回多少chunks
+  rerank_id                   # 重排模型ID
+  similarity_threshold        # 相似度阈值
+  vector_similarity_weight    # 向量权重
+
+现实例子：
+  id: "dialog_001"
+  name: "产品咨询助手"
+  llm_id: "gpt-4"
+  llm_setting: {
+      "temperature": 0.1,
+      "top_p": 0.3,
+      "max_tokens": 512
+  }
+  prompt_config: {
+      "system": "你是一个产品咨询专家",
+      "prologue": "你好，有什么我可以帮你的？"
+  }
+  kb_ids: ["kb_001", "kb_002"]  ← 连接了2个知识库
+  top_k: 1024
+  rerank_id: "BAAI/bge-reranker-v2-m3"
+```
+
+**为什么存 PostgreSQL？**
+- 每次用户对话都要 **快速读取这个配置**
+- 需要 **JOIN 查询**（知识库和模型的关联）
+- 管理员经常 **修改配置**（改模型、改 prompt）
+
+---
+
+**5️⃣ Conversation 表（对话历史）**
+
+```python
+# /api/db/db_models.py - class Conversation
+
+字段：
+  id          # 对话ID
+  dialog_id   # 属于哪个对话应用
+  name        # 对话标题
+  message     # 所有消息（JSON数组）
+  reference   # 引用的文献（JSON数组）
+  user_id     # 哪个用户
+
+现实例子：
+  id: "conv_001"
+  dialog_id: "dialog_001"
+  user_id: "user_123"
+  name: "RAG 相关问题讨论"
+  message: [
+      {
+          "role": "user",
+          "content": "什么是RAG？",
+          "timestamp": "2025-11-02 10:00:00"
+      },
+      {
+          "role": "assistant",
+          "content": "RAG是检索增强生成的缩写...",
+          "timestamp": "2025-11-02 10:00:05"
+      },
+      {
+          "role": "user",
+          "content": "怎么用RAG？",
+          "timestamp": "2025-11-02 10:00:10"
+      }
+  ]
+  reference: [
+      {
+          "chunk_id": "chunk_001",
+          "score": 0.92,
+          "content": "RAG涵盖检索和生成两个阶段..."
+      }
+  ]
+```
+
+**为什么存 PostgreSQL？**
+- 用户需要 **查看历史对话**
+- 需要 WHERE 查询：`SELECT * FROM conversation WHERE user_id='user_123'`
+- 对话数据有 **结构**（谁说的、什么时候、引用了什么）
+
+---
+
+#### 📊 对比：什么存哪里
+
+```
+数据类型            | 存储地点        | 为什么
+─────────────────────┼──────────────────┼──────────────────────
+用户ID、密码、邮箱   | PostgreSQL      | 需要快速验证身份
+知识库配置、权限      | PostgreSQL      | 需要经常修改和查询
+文档名字、大小、状态  | PostgreSQL      | 元数据，用于统计
+对话配置、LLM设置     | PostgreSQL      | 结构化，需要JOIN查询
+对话历史记录         | PostgreSQL      | 用户需要查看历史
+─────────────────────┼──────────────────┼──────────────────────
+实际的PDF文件(50MB)  | MinIO          | 太大，存数据库浪费
+OCR识别的图片        | MinIO          | 二进制，无需查询
+Embedding向量文件    | MinIO          | 二进制大文件
+导出的结果文件       | MinIO          | 临时文件
+```
+
+---
+
+#### 🎯 核心区别（最重要！）
+
+```
+PostgreSQL 的数据特点：
+  ✓ 经常被查询（WHERE/SELECT）
+  ✓ 经常被修改（UPDATE）
+  ✓ 有结构（表、列、关系）
+  ✓ 小文件（字符串、数字）
+  ✓ 需要事务一致性
+
+  用法：问数据库
+    "这个用户谁？"
+    "有多少个文档？"
+    "这个知识库的配置是什么？"
+    → 用 SQL 查询
+
+─────────────────────────────────
+
+MinIO 的数据特点：
+  ✓ 很少被查询（只用GET/PUT）
+  ✓ 很少被修改（上传后就不变了）
+  ✓ 无结构（就是文件）
+  ✓ 大文件（二进制、PDF、向量）
+  ✓ 不需要事务
+
+  用法：拿文件
+    "给我这个PDF"
+    "保存这个向量"
+    "保存这张OCR图片"
+    → 用 S3 API（GET/PUT）
+```
+
+---
+
+#### 💡 一个真实的例子
+
+**场景：用户上传一个 50MB 的 PDF**
+
+```
+第 1 步：存什么？
+  PostgreSQL:
+    ├─ 文档名：product_manual.pdf
+    ├─ 文档大小：52428800 (字节)
+    ├─ 文档位置：documents/original/doc_001.pdf  ← 这是 MinIO 的路径！
+    ├─ 上传时间：2025-11-02 10:00:00
+    └─ 处理状态：处理中
+
+  MinIO:
+    └─ /documents/original/doc_001.pdf  ← 实际的 PDF 二进制文件（50MB）
+
+第 2 步：用户问"我上传了哪些文件？"
+  查询 PostgreSQL:
+    SELECT name, size, created_at FROM document WHERE created_by='user_123'
+    ↓ 返回：product_manual.pdf, 50MB, 2025-11-02 10:00:00
+
+  不查询 MinIO（太慢了！）
+
+第 3 步：用户要下载这个文件
+  从 PostgreSQL 查询位置：documents/original/doc_001.pdf
+  ↓ 根据这个位置
+  ↓ 从 MinIO 取出文件
+  ↓ 给用户下载
+```
+
+**成本对比：**
+```
+❌ 如果把 50MB 的 PDF 存在 PostgreSQL BLOB：
+   - 数据库膨胀：50MB × 100 个用户 = 5GB
+   - 查询速度：>1 秒
+   - 成本：5GB × ¥1000/GB = ¥5,000
+   - 维护：需要 DBA 不断优化
+
+✅ 正确做法（PostgreSQL + MinIO）：
+   - PostgreSQL：只存 100 行元信息 = 10KB
+   - MinIO：存 100 个 PDF = 5GB（便宜的存储）
+   - 查询速度：<100ms
+   - 成本：PostgreSQL ¥50/月 + MinIO ¥50/月 = ¥100/月
+   - 维护：自动管理，零维护
+```
+
+---
+
 ### ⚠️ 常见错误和优化
 
 | 错误做法 | 后果 | 正确做法 |
