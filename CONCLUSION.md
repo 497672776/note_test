@@ -6890,6 +6890,478 @@ rag.retrieve(dataset_ids=[dataset.id], question="第一条规定什么")
 
 ---
 
+---
+
+## 🧠 RAG 核心引擎完全讲解
+
+RAG 是 RAGFlow 的"心脏"，负责**从原始文档到精确答案**的整个智能过程。
+
+### 核心架构图
+
+```
+📄 用户文档输入
+    ↓
+┌─────────────────────────────────────────┐
+│  /rag/app/  - 文档分块解析器             │  ← 识别文档特性，智能切割
+│  (naive, book, laws, paper, qa 等)      │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  /rag/flow/  - 处理流水线                │  ← 解析、分割、分词、抽取
+│  (parser, splitter, tokenizer)          │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  /rag/nlp/  - 自然语言处理               │  ← 分词、搜索、查询理解
+│  (tokenizer, search, query)             │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  /rag/llm/  - 大模型能力                 │  ← 对话、重排、向量化
+│  (chat, embedding, rerank)              │
+└─────────────────────────────────────────┘
+    ↓
+💡 智能答案输出
+```
+
+---
+
+## 📂 9 大目录详解
+
+### 1️⃣ **app/** - 文档解析工厂 (15 个专用解析器)
+
+**作用**：根据文档特性，选择合适的分割策略
+
+**文件列表**：
+```
+naive.py         (29KB)  ← 通用文本，简单分块
+book.py          (6.6KB) ← 书籍，按章节分块
+laws.py          (7.2KB) ← 法律，按条款分块（我们讲过！）
+paper.py         (11KB)  ← 学术论文，按段落分块
+qa.py            (19KB)  ← 问答对，保留Q/A结构
+table.py         (16KB)  ← 表格数据，保留表格结构
+manual.py        (12KB)  ← 用户手册，按功能分块
+email.py         (3.8KB) ← 邮件，按话题分块
+presentation.py  (6.7KB) ← PPT，按幻灯片分块
+resume.py        (5.8KB) ← 简历，按经历分块
+one.py           (5.4KB) ← 单页文档，整体处理
+audio.py         (2.3KB) ← 音频转录
+picture.py       (3.5KB) ← 图片文本提取
+tag.py           (5.8KB) ← 带标签内容
+```
+
+**关键概念**：
+- 每个解析器都继承自公共基类（比如 `Docx`, `Pdf`）
+- 负责识别"逻辑边界"（标题、段落、列表等）
+- 调用 flow/ 中的工具进行实际处理
+
+**工作流**：
+```python
+chunk_method="laws"
+  → 选择 laws.py
+  → 识别法律文件结构
+  → 按章/节/条/款分块
+  → 返回结构化数据
+```
+
+---
+
+### 2️⃣ **flow/** - 处理流水线 (文档处理的"生产线")
+
+**作用**：按步骤处理文档，从原始文本到可检索的块
+
+**五大子模块**：
+
+#### **flow/parser/** - 解析器
+```python
+parser.py - 文档格式转换
+  │
+  ├─ 识别文档结构（标题、列表、表格）
+  ├─ 提取内容
+  └─ 返回标准化格式
+```
+
+#### **flow/splitter/** - 分割器
+```python
+splitter.py - 按逻辑边界分割
+  │
+  ├─ 句子分割
+  ├─ 段落分割
+  ├─ 按长度分割
+  └─ 按标题分割
+```
+
+#### **flow/tokenizer/** - 分词器
+```python
+tokenizer.py - 文本分词
+  │
+  ├─ 中文分词（使用 jieba）
+  ├─ 英文分词
+  ├─ 计算 token 数
+  └─ 生成词向量索引
+```
+
+#### **flow/extractor/** - 抽取器
+```python
+extractor.py - 关键信息提取
+  │
+  ├─ 提取关键词
+  ├─ 提取实体（人、地、组织）
+  ├─ 提取摘要
+  └─ 生成问题
+```
+
+#### **flow/hierarchical_merger/** - 层级合并
+```python
+hierarchical_merger/ - 按结构合并
+  │
+  └─ 把相关段落归组
+     比如：同一章下的所有节合并在一起
+```
+
+#### **flow/pipeline.py** - 流水线调度器
+```python
+Pipeline - 主调度引擎
+  │
+  ├─ 初始化：读取 DSL（工作流定义）
+  ├─ 执行：按顺序调用各模块
+  ├─ 进度报告：callback 函数
+  ├─ 错误处理：异常捕获和重试
+  └─ 支持异步：trio 并发处理
+```
+
+**关键特性**：
+- 支持 DSL（Domain Specific Language）定义工作流
+- 支持进度追踪和任务取消
+- 与 Redis 集成存储进度信息
+- 与数据库服务集成
+
+---
+
+### 3️⃣ **llm/** - 大模型能力库 (7 大模块，204KB)
+
+**作用**：管理与大模型的所有交互
+
+**主要文件**：
+
+| 文件 | 功能 | 支持模型 |
+|------|------|---------|
+| `chat_model.py` (76KB) | 对话模型 | GPT, Claude, Gemini, GLM, 通义等 |
+| `embedding_model.py` (33KB) | 向量化模型 | BGE, Voyage, Text2vec等 |
+| `rerank_model.py` (17KB) | 重排模型 | BCErank, JinjaEvals等 |
+| `tts_model.py` (15KB) | 文字转语音 | OpenAI TTS, Azure等 |
+| `cv_model.py` (36KB) | 视觉模型 | GPT-4V, Claude Vision等 |
+| `sequence2txt_model.py` (11KB) | 序列转文本 | 语音识别 |
+
+**关键特性**：
+- **多供应商支持**：通过 LiteLLM 支持 50+ 个模型提供商
+- **错误处理**：速率限制、认证错误、超时等
+- **Token 计算**：精确追踪 token 消耗
+- **流式输出**：支持流式返回（实时显示）
+- **异步调用**：支持并发请求
+
+**使用示例**：
+```python
+from rag.llm import ChatModel
+
+chat = ChatModel()
+# 自动选择配置的模型（如 gpt-4 或 glm-4）
+response = chat.chat(
+    [{"role": "user", "content": "什么是 RAG？"}]
+)
+```
+
+---
+
+### 4️⃣ **nlp/** - 自然语言处理 (90KB)
+
+**作用**：文本理解、搜索和查询处理
+
+**主要模块**：
+
+| 模块 | 功能 | 说明 |
+|------|------|------|
+| `rag_tokenizer.py` (19KB) | 分词引擎 | 多语言支持 |
+| `__init__.py` (27KB) | NLP 工具库 | 各种文本处理函数 |
+| `search.py` (27KB) | 搜索引擎 | 混合搜索（向量+关键词） |
+| `query.py` (11KB) | 查询理解 | 解析用户问题 |
+| `term_weight.py` (8.1KB) | 词权重计算 | TF-IDF 等 |
+| `surname.py` (4.2KB) | 人名识别 | 中文姓名 |
+| `synonym.py` (3.1KB) | 同义词库 | 词语扩展 |
+
+**关键功能**：
+
+**分词**（rag_tokenizer.py）：
+```python
+# 中文分词
+tokenizer.tokenize("RAGFlow 是一个智能系统")
+# → ["RAGFlow", "是", "一个", "智能", "系统"]
+
+# 计算 token 数（用于 LLM）
+tokenizer.count("这是文本")
+# → 4 tokens
+```
+
+**混合搜索**（search.py）：
+```python
+# 既用向量搜索（语义），也用关键词搜索
+results = search(
+    question="什么是向量？",
+    chunks=all_chunks,
+    top_k=10,
+    use_vector=True,  # 向量搜索
+    use_keyword=True  # 关键词搜索
+)
+```
+
+**查询理解**（query.py）：
+```python
+# 理解用户的复杂问题
+query = "最近一个月，用户增长最快的功能是什么？"
+# → 提取关键词、时间范围、查询意图
+```
+
+---
+
+### 5️⃣ **prompts/** - 提示词库 (160KB，32 个 .md 文件 + generator.py)
+
+**作用**：存储所有 AI 提示词模板
+
+**主要提示词**：
+
+```
+通用提示词：
+  question_prompt.md          - 用户问题处理
+  citation_prompt.md          - 引用格式指导
+
+内容分析：
+  toc_detection.md            - 目录检测
+  toc_extraction.md           - 目录提取
+  toc_relevance_system.md     - 目录相关性判断
+
+对话与摘要：
+  ask_summary.md              - 摘要生成
+  related_question.md         - 相关问题生成
+  reflect.md                  - 反思与改进
+  rank_memory.md              - 记忆排序
+
+高级特性：
+  vision_llm_describe_prompt.md    - 图像描述
+  content_tagging_prompt.md        - 内容标签
+  meta_filter.md                   - 元数据过滤
+  cross_languages_sys_prompt.md    - 多语言支持
+  analyze_task_system.md           - 任务分析
+```
+
+**generator.py (31KB)**：
+- 动态生成提示词
+- 支持变量插值
+- 支持多语言
+- 智能缓存
+
+**使用示例**：
+```python
+from rag.prompts.generator import PromptsGenerator
+
+gen = PromptsGenerator()
+prompt = gen.gen_relate_question(
+    text="RAGFlow 是一个开源项目",
+    question_count=5
+)
+# → 生成 5 个与此文本相关的问题
+```
+
+---
+
+### 6️⃣ **utils/** - 工具库 (176KB，多数据库连接器)
+
+**作用**：连接外部服务（存储、搜索、MCP 等）
+
+**存储连接**（向量和元数据）：
+```
+infinity_conn.py      (33KB)  ← Infinity（开源向量数据库）
+es_conn.py           (26KB)  ← Elasticsearch（搜索引擎）
+opensearch_conn.py   (23KB)  ← OpenSearch（搜索引擎）
+redis_conn.py        (14KB)  ← Redis（缓存和存储）
+doc_store_conn.py    (7.5KB) ← 文档存储
+```
+
+**云存储连接**（文件存储）：
+```
+minio_conn.py        (6.1KB)  ← MinIO（对象存储）
+s3_conn.py           (7.7KB)  ← AWS S3
+azure_sas_conn.py    (3.7KB)  ← Azure（SAS 认证）
+azure_spn_conn.py    (3.7KB)  ← Azure（SPN 认证）
+oss_conn.py          (6.0KB)  ← 阿里云 OSS
+opendal_conn.py      (4.4KB)  ← OpenDAL（通用存储）
+```
+
+**其他连接**：
+```
+mcp_tool_call_conn.py (11KB)  ← MCP（Model Context Protocol）
+tavily_conn.py        (1.7KB) ← 网页搜索 API
+```
+
+**storage_factory.py** (1.6KB)：
+- 根据配置选择合适的存储后端
+- 工厂模式实现
+
+---
+
+### 7️⃣ **svr/** - 服务层 (56KB)
+
+**作用**：任务执行、缓存、通知等系统级功能
+
+**主要模块**：
+
+| 文件 | 功能 | 说明 |
+|------|------|------|
+| `task_executor.py` (46KB) | 任务执行器 | 执行异步任务、重试、取消 |
+| `cache_file_svr.py` (1.9KB) | 文件缓存 | 临时文件管理 |
+| `discord_svr.py` (2.6KB) | Discord 通知 | 发送处理结果通知 |
+
+**task_executor.py 关键职责**：
+```python
+TaskExecutor
+  │
+  ├─ 执行文档处理任务
+  ├─ 管理任务队列
+  ├─ 重试失败的任务
+  ├─ 支持任务取消
+  ├─ 记录任务日志
+  └─ 发送进度通知
+```
+
+---
+
+### 8️⃣ **res/** - 资源文件 (8.5MB)
+
+**作用**：NLP 工具需要的数据文件
+
+**包含内容**：
+```
+huqie.txt    (8.0MB)  ← 中文分词词库
+               （包含所有常见词汇、地名、人名等）
+
+ner.json     (230KB)  ← 命名实体识别字典
+               （人名、地名、组织名等）
+
+synonym.json (263KB)  ← 同义词字典
+               （词语扩展用）
+```
+
+---
+
+### 9️⃣ **其他文件**
+
+| 文件 | 功能 |
+|------|------|
+| `settings.py` | 配置管理 |
+| `benchmark.py` | 性能测试 |
+| `raptor.py` | RAPTOR 算法（递归文本摘要） |
+| `__init__.py` | 包初始化 |
+
+---
+
+## 🔄 完整工作流程示例
+
+### 场景：用户上传一份法律合同
+
+```
+1. 用户上传 contract.docx，选择 chunk_method="laws"
+   ↓
+2. API 路由到 /rag/app/laws.py
+   ↓
+3. Docx 类读取文件
+   app/laws.py → Docx()
+   ├─ 识别结构（第一章、第一条等）
+   ├─ 调用 flow/parser/ 进行结构分析
+   └─ 构建 Node 树
+   ↓
+4. flow/pipeline.py 调度处理流程
+   ├─ parser/ 提取文本
+   ├─ splitter/ 按逻辑边界分割
+   ├─ tokenizer/ 分词（nlp/rag_tokenizer.py）
+   └─ extractor/ 抽取关键信息
+   ↓
+5. nlp/search.py 生成向量和索引
+   ├─ 调用 llm/embedding_model.py 生成向量
+   └─ 存储到 utils/infinity_conn.py（向量数据库）
+   ↓
+6. 存储元数据到 utils/redis_conn.py（缓存）
+   ↓
+7. svr/task_executor.py 报告完成
+   └─ Discord 通知用户
+   ↓
+8. 用户提问："第五条规定什么？"
+   ↓
+9. nlp/query.py 理解问题
+   ↓
+10. nlp/search.py 混合搜索
+    ├─ 向量搜索（语义）
+    ├─ 关键词搜索
+    └─ 结合得分排序
+    ↓
+11. llm/chat_model.py 生成答案
+    ├─ 调用 OpenAI / GLM 等大模型
+    └─ 使用 prompts/citation_prompt.md 格式化答案
+    ↓
+12. 返回答案给用户
+```
+
+---
+
+## 🎯 各目录优先级和学习顺序
+
+| 优先级 | 目录 | 学习难度 | 重要性 | 建议 |
+|--------|------|---------|--------|------|
+| ⭐⭐⭐ | app/ | 中 | 极高 | 先学，了解各种解析策略 |
+| ⭐⭐⭐ | flow/ | 高 | 极高 | 学，理解处理流程 |
+| ⭐⭐⭐ | llm/ | 中 | 极高 | 学，理解大模型调用 |
+| ⭐⭐ | nlp/ | 高 | 高 | 深入学，搜索和分词很复杂 |
+| ⭐⭐ | prompts/ | 低 | 中 | 了解提示词工程 |
+| ⭐ | svr/ | 中 | 中 | 了解任务管理 |
+| ⭐ | utils/ | 中 | 中 | 了解外部服务集成 |
+| ⭐ | res/ | 低 | 低 | 就是数据文件 |
+
+---
+
+## 📊 代码量统计
+
+```
+app/       ≈ 120 KB    ← 15 个解析器
+flow/      ≈ 50 KB     ← 处理流水线
+llm/       ≈ 200 KB    ← 大模型集成（最复杂）
+nlp/       ≈ 90 KB     ← 文本处理（最复杂）
+prompts/   ≈ 160 KB    ← 提示词库
+svr/       ≈ 60 KB     ← 服务层
+utils/     ≈ 175 KB    ← 数据库连接
+res/       ≈ 8.5 MB    ← 资源文件
+
+总计：≈ 16,600 行代码 + 8.5 MB 资源
+```
+
+---
+
+## 🎓 总结：RAG 的三大核心能力
+
+### 1. **理解**（app/ + flow/ + nlp/）
+- 读懂各种格式的文档
+- 识别逻辑结构
+- 分词和语义理解
+
+### 2. **存储和检索**（utils/ + llm/embedding）
+- 将内容向量化
+- 存储到向量数据库
+- 支持混合搜索
+
+### 3. **生成**（llm/ + prompts/）
+- 调用大模型
+- 用提示词指导生成
+- 格式化输出
+
+---
+
 **分析时间**：2025-11-02
 **项目**：RAGFlow（InfiniFlow）
 **许可**：Apache 2.0
