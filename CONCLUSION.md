@@ -1347,10 +1347,294 @@ IDF(和) = log((1000 - 800 + 0.5) / (800 + 0.5)) = log(0.25) ≈ -1.39 ← 负�
 
 **代码位置**：
 
+#### Elasticsearch 核心文件结构
+
 ```
-/home/liudecheng/rag_flow_test/ragflow/rag/nlp/search.py
-在 Dealer 类的 search() 方法中
-使用 Elasticsearch 或 Infinity 的 BM25 评分
+/home/liudecheng/rag_flow_test/ragflow/
+
+├── rag/
+│   ├── utils/
+│   │   ├── es_conn.py           ← ⭐ Elasticsearch 连接和操作（633行）
+│   │   ├── doc_store_conn.py    ← 抽象基类（所有数据库的统一接口）
+│   │   ├── infinity_conn.py     ← Infinity 向量数据库连接
+│   │   └── opensearch_conn.py   ← OpenSearch 连接
+│   │
+│   └── nlp/
+│       └── search.py            ← Dealer 类（使用 DocStoreConnection）
+│
+├── admin/server/
+│   └── config.py               ← ElasticsearchConfig 配置类
+│
+└── settings.py                  ← DOC_ENGINE 配置（默认 'elasticsearch'）
+```
+
+#### Elasticsearch 代码详解
+
+**1️⃣ 核心实现：/rag/utils/es_conn.py**
+
+```python
+主要类：ESConnection(DocStoreConnection)
+
+关键方法：
+  __init__()          - 连接 Elasticsearch（自动重试 2 次）
+  createIdx()         - 创建索引
+  search()            - 全文 + 向量混合搜索（核心方法！）
+  get()               - 获取单个 chunk
+  insert()            - 批量插入文档（使用 bulk API）
+  update()            - 更新文档（UpdateByQuery）
+  delete()            - 删除文档
+  sql()               - SQL 查询（Elasticsearch SQL 接口）
+  get_cluster_stats() - 获取集群统计信息
+```
+
+**核心搜索方法详解（search() 方法）**：
+
+```python
+# 第 143-272 行
+def search(
+    selectFields: list[str],
+    highlightFields: list[str],
+    condition: dict,
+    matchExprs: list[MatchExpr],  # 包含 MatchTextExpr（全文）和 MatchDenseExpr（向量）
+    orderBy: OrderByExpr,
+    offset: int,
+    limit: int,
+    indexNames: str | list[str],
+    knowledgebaseIds: list[str],
+    ...
+):
+```
+
+**两条搜索路线的实现**：
+
+```python
+【路线 A：全文搜索】第 194-202 行
+  for m in matchExprs:
+      if isinstance(m, MatchTextExpr):
+          # 创建 query_string 查询，包含权重信息
+          bqry.must.append(
+              Q("query_string",
+                fields=m.fields,
+                query=m.matching_text,        # "OpenAI 机器学习"
+                minimum_should_match=...,     # 至少匹配比例
+                boost=1)                      # 权重提升因子
+          )
+
+【路线 B：向量搜索】第 204-215 行
+  elif isinstance(m, MatchDenseExpr):
+      s = s.knn(
+          m.vector_column_name,         # 向量字段名
+          m.topn,
+          m.topn * 2,
+          query_vector=list(m.embedding_data),  # 查询向量
+          filter=bqry.to_dict(),        # 用全文查询作为 filter
+          similarity=m.extra_options["similarity"]
+      )
+
+【融合】第 217-224 行
+  # PageRank 和其他排序因子
+  for fld, sc in rank_feature.items():
+      bqry.should.append(
+          Q("rank_feature",
+            field=fld,
+            linear={},
+            boost=sc)
+      )
+  s = s.query(bqry)
+```
+
+**权重的实际使用（BM25 计算）**：
+
+```
+Elasticsearch 的 BM25 公式在这里：
+  score = IDF(term) × (k1+1) × freq(term) / (k1 + freq(term))
+
+在 Python elasticsearch-dsl 库中：
+  Q("query_string", query="...", boost=...)
+                                  ↑ 这里乘以权重提升因子
+
+最后得分 = BM25分 × 权重提升 + 向量相似度 × 向量权重
+```
+
+**2️⃣ 配置：/admin/server/config.py**
+
+```python
+# 第 ~100 行
+class ElasticsearchConfig(RetrievalConfig):
+    name: str = 'elasticsearch'
+    retrieval_type: str = "elasticsearch"
+    # 其他配置：host, port, username, password, etc.
+```
+
+**3️⃣ 使用入口：/rag/nlp/search.py**
+
+```python
+# 第 1-50 行（大概）
+from rag.utils.doc_store_conn import DocStoreConnection
+
+class Dealer:
+    def __init__(self, dataStore: DocStoreConnection):
+        # 这里 dataStore 可以是：
+        #   - ESConnection (Elasticsearch)
+        #   - InfinityConnection (Infinity)
+        #   - OSConnection (OpenSearch)
+        self.dataStore = dataStore
+
+    def search(self, ...):
+        # 调用 self.dataStore.search()
+        # 实际会调用 ESConnection 或其他数据库的 search() 方法
+        res = self.dataStore.search(
+            selectFields=...,
+            highlightFields=...,
+            condition=...,
+            matchExprs=[...],  # 包含全文和向量表达式
+            ...
+        )
+        return res
+```
+
+**4️⃣ 全局配置：/rag/settings.py**
+
+```python
+# 第 ~20 行
+DOC_ENGINE = os.getenv('DOC_ENGINE', 'elasticsearch')
+```
+
+#### Elasticsearch 的工作流
+
+```
+【用户上传文档】
+  ↓
+【分块 + 权重计算】(term_weight.py)
+  ↓
+【创建索引】
+  es_conn.createIdx()  ← 创建 Elasticsearch 索引
+  ↓
+【插入文档】
+  es_conn.insert(documents)  ← 批量插入 chunks
+  ↓
+【用户搜索】
+  ↓
+【构建查询】
+  - 全文查询：Q("query_string", query=..., boost=权重)
+  - 向量查询：knn(..., query_vector=...)
+  ↓
+【执行搜索】
+  es_conn.search()  ← 执行组合查询
+  ↓
+【返回结果】
+  - 每个 chunk 有 _score 字段（BM25 分数）
+  - 可以获取 highlight（高亮）
+  ↓
+【重排和融合】
+  - 向量相似度 + 全文 BM25 分数 → 融合分数
+  - 按最终分数排序
+```
+
+#### 关键参数说明
+
+```python
+# es_conn.py 第 74-80 行：连接参数
+self.es = Elasticsearch(
+    settings.ES["hosts"].split(","),      # ES 地址
+    basic_auth=(username, password),      # 认证
+    verify_certs=False,                   # 忽略 SSL 证书
+    timeout=600                           # 超时时间
+)
+
+# es_conn.py 第 184-192 行：融合权重配置
+vector_similarity_weight = 0.5  # 向量搜索权重
+# 稀疏搜索权重 = 1 - 0.5 = 0.5
+# 即：全文权重 50%，向量权重 50%
+
+# es_conn.py 第 198-202 行：全文查询参数
+bqry.must.append(Q("query_string",
+    fields=m.fields,                      # 搜索的字段
+    query=m.matching_text,                # "OpenAI 机器学习框架"
+    minimum_should_match=...,             # 最少匹配比例（%）
+    boost=1                               # 权重因子（>1 提升，<1 降低）
+))
+```
+
+#### BM25 参数（在 Elasticsearch 中）
+
+```
+# 在 mapping.json 中配置
+
+"your_field": {
+  "type": "text",
+  "analyzer": "standard",
+  "similarity": "BM25"  # 使用 BM25 评分
+}
+
+BM25 的 k1 和 b 参数（Elasticsearch 默认值）：
+  k1 = 1.2    # 词频饱和度
+  b = 0.75    # 文档长度标准化
+```
+
+#### 实际查询示例
+
+```python
+# 搜索"OpenAI 机器学习"时的实际查询：
+
+query = {
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "query_string": {
+            "fields": ["content_tks"],
+            "query": "OpenAI 机器学习",      # 全文
+            "boost": 1.0,                     # 权重
+            "minimum_should_match": "75%"
+          }
+        }
+      ],
+      "filter": [
+        {"term": {"kb_id": "xxx"}},           # 知识库过滤
+        {"term": {"available_int": 1}}        # 可用性过滤
+      ],
+      "should": [
+        {
+          "rank_feature": {
+            "field": "pagerank",
+            "linear": {},
+            "boost": 0.2                      # PageRank 排序因子
+          }
+        }
+      ]
+    }
+  },
+  "knn": {
+    "field": "embedding",                     # 向量字段
+    "query_vector": [...],                    # 查询向量
+    "k": 10,                                  # top k
+    "num_candidates": 20,
+    "filter": {...}                           # 向量搜索的 filter
+  }
+}
+```
+
+#### 和 search.py 中 Dealer 的关系
+
+```
+Dealer.search()
+  ↓
+调用 self.dataStore.search()
+  ↓
+如果 dataStore 是 ESConnection，则调用 ESConnection.search()
+  ↓
+ESConnection.search() 构建上面的查询
+  ↓
+调用 self.es.search() 执行查询
+  ↓ (self.es 是 Elasticsearch Python 客户端)
+将查询发送到 Elasticsearch 服务器
+  ↓
+Elasticsearch 执行 BM25 + KNN 搜索
+  ↓
+返回结果给 Python
+  ↓
+在 search.py 中的 Dealer 处理结果（重排、融合等）
 ```
 
 **快速查看权重分数高低的技巧**：
