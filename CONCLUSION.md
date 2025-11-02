@@ -2790,6 +2790,731 @@ scores, token_count = reranker.similarity(query, texts)
 
 ---
 
+## 💾 数据库完全指南：各类数据库存什么、什么时候用
+
+### "为什么需要这么多数据库？它们分别存什么？"
+
+**简短回答**：因为不同类型的数据有不同的特点。RAGFlow 需要 4 种数据库，每种各司其职。想象一个大公司：
+
+- **向量数据库** = 搜索引擎（快速找相关的文档）
+- **关系数据库** = 财务系统（记录谁有什么权限）
+- **缓存层** = 秘书的便签（记住经常查的东西）
+- **文件存储** = 文档仓库（存放原始文件）
+
+### 📊 一张表看懂全景
+
+```
+┌─────────────────┬──────────────────┬─────────┬──────────────┬─────────────┐
+│ 数据库类型      │ 主要存储内容     │ 访问频度│ 读写特性     │ 典型产品    │
+├─────────────────┼──────────────────┼─────────┼──────────────┼─────────────┤
+│ 向量数据库      │ 向量 + 文本内容  │ 频繁    │ 高频读，     │ Elasticsearch
+│                 │（embedding）     │        │ 低频写      │ Infinity    │
+│                 │                  │        │              │ OpenSearch  │
+│                 │                  │        │              │ Weaviate    │
+├─────────────────┼──────────────────┼─────────┼──────────────┼─────────────┤
+│ 关系数据库      │ 结构化数据       │ 中等    │ 频繁读写，   │ PostgreSQL  │
+│                 │（元数据、配置）  │        │ 支持事务    │ MySQL       │
+├─────────────────┼──────────────────┼─────────┼──────────────┼─────────────┤
+│ 缓存存储        │ 热数据缓存       │ 极高    │ 快速读写，   │ Redis       │
+│                 │（会话、结果）    │        │ 支持过期    │             │
+├─────────────────┼──────────────────┼─────────┼──────────────┼─────────────┤
+│ 对象存储        │ 原始文件、二进制 │ 低      │ 追加写，     │ MinIO       │
+│                 │（embedding缓存） │        │ 顺序读      │ S3 / OSS    │
+└─────────────────┴──────────────────┴─────────┴──────────────┴─────────────┘
+```
+
+---
+
+### 🔍 向量数据库：核心搜索引擎
+
+#### 存什么？
+
+在 RAGFlow 中，每个文档被切割成 chunks（块），每个 chunk 包含：
+
+```python
+{
+    "chunk_id": "doc_123_chunk_45",
+    "content": "这是第 45 个块的文本内容...",                     # ← 原始文本
+    "embedding": [0.123, 0.456, ..., 0.789],           # ← 768 维向量
+    "metadata": {
+        "doc_id": "doc_123",
+        "page_num": 10,
+        "chunk_order": 45,
+        "token_count": 256,
+        "weight_score": 0.85
+    }
+}
+```
+
+**核心数据**：
+1. **向量（Embedding）**：768-1024 维的浮点数数组
+   - 来自 Embedding Model（如 BAAI/bge-large）
+   - 表示文本的语义信息
+
+2. **文本内容**：原始或处理后的文本
+   - 用于全文搜索（ES）或展示
+
+3. **元数据**：chunk 的属性
+   - 来源文档、位置、权重等
+
+#### 什么时候用到？
+
+**最关键的时刻：用户提问时**
+
+```
+用户问：「什么是 RAG？」
+         ↓
+RAGFlow 生成 query 向量（维度 768）
+         ↓
+向量数据库找出最相似的 chunks（通过余弦相似度）
+         ↓
+返回 Top-K chunks（默认 10 个）给 LLM
+         ↓
+LLM 基于这些 chunks 回答问题
+```
+
+**完整流程中的 5 个时刻**：
+
+| 时刻 | 操作 | 涉及数据 |
+|-----|------|--------|
+| 1️⃣ 用户上传文档 | 批量写入 chunks | INSERT 10000+ 条 |
+| 2️⃣ 用户提问 | 向量搜索 | SELECT 基于向量相似度 |
+| 3️⃣ 需要重新排序 | 混合搜索 | SELECT 文本 + 向量 |
+| 4️⃣ 性能分析 | 统计查询 | 聚合操作 |
+| 5️⃣ 维护删除 | 删除过期文档 | DELETE |
+
+#### 四种向量数据库对比
+
+**1. Elasticsearch 8.x** ⭐⭐⭐⭐
+
+```
+特点：
+  ✓ 同时支持全文搜索 + 向量搜索
+  ✓ 生态最完善，插件多
+  ✓ 支持复杂的 bool 查询
+  ✗ 资源占用大（至少 2GB 内存）
+  ✗ 维护成本高
+
+什么时候选择：
+  - 需要全文搜索 + 向量搜索混合
+  - 用户数较多，查询复杂
+  - 已有 Elasticsearch 基础设施
+  - 企业级应用（有 DBA 维护）
+
+成本：
+  - 自建：¥200-500/月（服务器）
+  - 云托管：¥500-2000/月
+```
+
+**查询示例**（实际 RAGFlow 使用）：
+```python
+# /home/liudecheng/rag_flow_test/ragflow/rag/utils/es_conn.py:143-272
+# 混合查询：同时返回向量相似度和关键词匹配
+query = {
+    "knn": {
+        "embedding": {                    # ← 向量字段
+            "vector": [0.123, ...],      # ← query embedding
+            "k": 10,
+            "num_candidates": 100,
+            "filter": {                  # ← 关键词过滤
+                "bool": {
+                    "must": [
+                        {"term": {"doc_id": "doc_123"}}
+                    ]
+                }
+            }
+        }
+    },
+    "query": {
+        "bool": {                         # ← 关键词查询（权重）
+            "must": [
+                {"match": {"content": "RAG"},"boost": 1.5}
+            ]
+        }
+    }
+}
+# 最终融合：向量相似度 50% + 关键词分数 50%
+```
+
+---
+
+**2. Infinity** ⭐⭐⭐⭐⭐
+
+```
+特点：
+  ✓ 轻量级，专为向量优化
+  ✓ 资源消耗少（500MB 内存）
+  ✓ 部署简单，开源免费
+  ✓ 性能与 Elasticsearch 相近
+  ✗ 全文搜索能力弱
+  ✗ 生态不如 Elasticsearch
+
+什么时候选择：
+  - 只需要向量搜索
+  - 资源受限（边缘计算、IoT）
+  - 想快速原型验证
+  - 成本优先
+
+成本：
+  - 自建：¥50-100/月（小服务器）
+  - 完全开源，无额外费用
+```
+
+**适用场景**：
+```
+初创公司：Infinity（成本低，功能够）
+  ↓ 用户增长
+中等规模：迁移 Elasticsearch（需要全文搜索）
+  ↓ 用户爆增
+大型企业：Elasticsearch + 多副本（高可用）
+```
+
+---
+
+**3. OpenSearch** ⭐⭐⭐
+
+```
+特点：
+  ✓ 基于 Elasticsearch 7.10 fork
+  ✓ 完全开源，AWS 友好
+  ✓ 功能 95% 兼容 Elasticsearch
+  ✗ 生态较小
+  ✗ 新功能更新不及 Elasticsearch
+
+什么时候选择：
+  - 使用 AWS 基础设施
+  - 不想付 Elastic 的商业许可费
+  - 需要 Elasticsearch 级别的功能
+```
+
+---
+
+**4. Weaviate** ⭐⭐⭐
+
+```
+特点：
+  ✓ 专门用于知识图谱 + 向量搜索
+  ✓ 支持图查询（节点间关系）
+  ✓ 多模态搜索（文本+图像）
+  ✗ 学习曲线陡峭
+  ✗ 生态相对较小
+
+什么时候选择：
+  - 需要构建知识图谱（概念间关系）
+  - 需要多模态搜索
+  - 复杂的语义关系查询
+  - 高端 RAG 应用
+```
+
+---
+
+### 📋 关系数据库：元数据和业务数据
+
+#### 存什么？
+
+关系数据库不存向量，只存 **结构化数据**。例如：
+
+```sql
+-- 用户表
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY,
+    email VARCHAR(255) UNIQUE,
+    created_at TIMESTAMP,
+    permission ENUM('admin', 'user'),
+    api_quota INT DEFAULT 1000
+);
+
+-- 知识库表
+CREATE TABLE knowledge_bases (
+    kb_id UUID PRIMARY KEY,
+    kb_name VARCHAR(128) UNIQUE,
+    owner_id UUID FOREIGN KEY,
+    created_at TIMESTAMP,
+    parser_id VARCHAR(32),            -- naive / hierarchical / tree
+    embedding_model VARCHAR(128),      -- bge-large@Builtin
+    pagerank INT DEFAULT 50
+);
+
+-- 文档表
+CREATE TABLE documents (
+    doc_id UUID PRIMARY KEY,
+    kb_id UUID FOREIGN KEY,
+    doc_name VARCHAR(255),
+    created_at TIMESTAMP,
+    chunk_count INT,
+    status ENUM('processing', 'done', 'error')
+);
+
+-- API 日志表
+CREATE TABLE api_logs (
+    log_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id UUID,
+    api_endpoint VARCHAR(255),
+    request_tokens INT,
+    response_tokens INT,
+    created_at TIMESTAMP
+);
+```
+
+**关键点**：
+- 没有向量数据
+- 都是纯数据（字符串、数字、日期）
+- 支持 ACID 事务（数据一致性）
+- 支持复杂的 SQL 查询和关联
+
+#### 什么时候用到？
+
+**几乎在 RAGFlow 的每个业务操作中**：
+
+| 操作 | 访问关系数据库 | 原因 |
+|------|---------------|------|
+| 用户登录 | ✓ | 查询 user 表验证身份 |
+| 创建知识库 | ✓ | 创建 kb 记录，检查重名 |
+| 上传文档 | ✓ | 创建 doc 记录，初始化状态 |
+| 获取切割方法 | ✓ | 从 kb 表读取 parser_id |
+| 统计用户配额 | ✓ | 从 api_logs 统计 tokens |
+| 删除知识库 | ✓ | 事务删除（kb + doc + chunks） |
+| 获取权限列表 | ✓ | 检查用户是否有访问权 |
+
+**典型流程中的位置**：
+
+```
+用户请求：「创建知识库」
+         ↓
+[关系数据库] 检查名称是否重复 ← SELECT
+         ↓
+[关系数据库] 创建 kb 记录 ← INSERT
+         ↓
+[向量数据库] 创建 index ← 写入向量数据前的准备
+         ↓
+返回 kb_id 给前端
+         ↓
+用户上传文档
+         ↓
+[关系数据库] 创建 doc 记录 ← INSERT
+         ↓
+[后台任务] 切割并生成向量
+         ↓
+[向量数据库] 插入 chunks ← 批量写入
+         ↓
+[关系数据库] 更新 doc 状态为 'done' ← UPDATE
+```
+
+#### PostgreSQL vs MySQL
+
+| 特性 | PostgreSQL | MySQL |
+|-----|-----------|-------|
+| **ACID 事务** | ✓ 完整 | ~ 仅 InnoDB |
+| **数据类型** | 更丰富（JSON、数组、UUID）| 基础类型 |
+| **性能** | 大数据量更稳定 | 初期快 |
+| **学习曲线** | 陡峭 | 温和 |
+| **成本** | 一样 | 一样 |
+| **推荐** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
+
+**RAGFlow 的选择**：默认推荐 PostgreSQL（见代码中的 Peewee ORM）
+
+---
+
+### ⚡ Redis：缓存和会话层
+
+#### 存什么？
+
+**热数据**（频繁访问、临时数据）：
+
+```python
+# 典型的 Redis 数据结构
+
+# 1. 用户会话缓存
+redis.set("session:user_123", json.dumps({
+    "user_id": "user_123",
+    "login_time": "2025-11-02 10:00:00",
+    "last_request": "2025-11-02 10:05:30"
+}), ex=3600)  # 过期时间：1 小时
+
+# 2. API 速率限制
+redis.incr(f"api_limit:user_123:{today}", ex=86400)  # 每天重置
+
+# 3. 后台任务队列
+redis.lpush("task_queue:chunk_processing", {
+    "doc_id": "doc_123",
+    "status": "pending",
+    "priority": 5
+})
+
+# 4. 查询结果缓存
+redis.set(f"search_cache:{query_hash}",
+    json.dumps(search_results), ex=300)  # 过期时间：5 分钟
+
+# 5. 计数器（统计）
+redis.incr(f"stats:daily_queries:{date}")
+redis.incr(f"stats:user_api_calls:user_123")
+```
+
+#### 什么时候用到？
+
+| 使用场景 | 具体用途 | 为什么用 Redis |
+|---------|--------|----------------|
+| **用户认证** | 会话存储 | 快速验证身份（<10ms） |
+| **API 限流** | 计数器 | 防止滥用，记录调用次数 |
+| **任务队列** | 分布式处理 | 后台异步处理切割任务 |
+| **搜索缓存** | 热查询缓存 | "什么是 RAG"多人查，缓存结果 |
+| **排行榜** | Sorted Set | 统计热门问题 |
+| **实时统计** | 计数递增 | 实时显示 API 使用量 |
+
+**性能对比**：
+
+```
+PostgreSQL 查询：10-100ms   ← 太慢
+Redis 查询：     1-5ms     ← 够快！
+内存访问：       <1ms      ← 最快
+```
+
+**RAGFlow 中的例子**：
+
+```python
+# 缓存搜索结果（5 分钟有效期）
+query_hash = md5(f"{question}_{kb_ids}_{top_k}".encode()).hexdigest()
+cache_key = f"search:{query_hash}"
+
+if redis.exists(cache_key):
+    # 缓存命中，返回缓存结果（<5ms）
+    return json.loads(redis.get(cache_key))
+
+# 缓存未命中，执行搜索
+results = vector_db.search(question, kb_ids, top_k)
+
+# 缓存结果
+redis.set(cache_key, json.dumps(results), ex=300)
+
+return results
+```
+
+---
+
+### 📦 对象存储：文档和大文件仓库
+
+#### 存什么？
+
+**二进制数据和原始文件**：
+
+```
+对象存储中的目录结构：
+/
+├── documents/
+│   ├── original/                     # ← 原始上传的文档
+│   │   ├── doc_123.pdf
+│   │   ├── doc_124.docx
+│   │   └── doc_125.xlsx
+│   │
+│   ├── processed/                    # ← 处理后的版本
+│   │   ├── doc_123_cleaned.txt
+│   │   └── doc_124_cleaned.txt
+│
+├── embeddings/                       # ← embedding 缓存
+│   ├── chunk_001_embedding.bin       # ← 768 维向量的二进制
+│   └── chunk_002_embedding.bin
+│
+├── cache/                            # ← 临时缓存
+│   ├── ocr_results/
+│   │   └── doc_123_page_10.json
+│   └── parse_results/
+│       └── doc_124_structure.json
+│
+└── export/                           # ← 导出的结果
+    ├── user_123_export_2025_11_02.zip
+    └── report_2025_11_02.pdf
+```
+
+**为什么不存在 PostgreSQL？**
+
+```
+文件大小：
+  PostgreSQL：最多 1GB（超大 BLOB 很慢）
+  对象存储：支持 TB 级文件
+
+访问模式：
+  PostgreSQL：随机访问（不擅长大文件）
+  对象存储：顺序读写（针对大文件优化）
+
+成本：
+  PostgreSQL：每 GB ¥1000/年（贵！）
+  对象存储：每 GB ¥0.1/年（便宜！）
+
+扩展性：
+  PostgreSQL：单机限制
+  对象存储：无限扩展（云原生）
+```
+
+#### 什么时候用到？
+
+| 时刻 | 操作 | 存储内容 |
+|-----|------|--------|
+| 1️⃣ 用户上传 | 保存原文件 | doc_123.pdf → /documents/original/ |
+| 2️⃣ 文档解析 | 保存 OCR/解析结果 | doc_123_page_10.json → /cache/ocr_results/ |
+| 3️⃣ 生成向量 | 缓存 embedding | [0.123, 0.456, ...] → /embeddings/chunk_001.bin |
+| 4️⃣ 生成导出 | 导出结果 | user_123_export.zip → /export/ |
+| 5️⃣ 定期清理 | 删除过期文件 | 删除 30 天前的缓存 |
+
+**代码示例**：
+
+```python
+# MinIO 客户端（S3 兼容）
+from minio import Minio
+
+client = Minio("minio:9000", access_key="minioadmin", secret_key="minioadmin")
+
+# 上传原始文件
+client.fput_object(
+    bucket_name="ragflow",
+    object_name="documents/original/doc_123.pdf",
+    file_path="/tmp/doc_123.pdf"
+)
+
+# 保存 embedding 缓存（二进制）
+client.put_object(
+    bucket_name="ragflow",
+    object_name="embeddings/chunk_001.bin",
+    data=embedding_array.tobytes(),
+    length=768 * 4  # 768 维 float32
+)
+
+# 下载供用户查看
+client.fget_object(
+    bucket_name="ragflow",
+    object_name="documents/original/doc_123.pdf",
+    file_path="/tmp/download/doc_123.pdf"
+)
+```
+
+---
+
+### 🔄 完整数据流：一个查询的旅程
+
+用户问：「什么是 RAG？」
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 第 1 步：前置查询（关系数据库）                         │
+│                                                         │
+│ SELECT * FROM users WHERE user_id = ?                  │
+│ ↓ 验证用户身份、查询权限                               │
+│ ↓ 如果缓存中有就走第 2 步，否则继续                    │
+│                                                         │
+│ [关系数据库] ← 验证权限用时：5ms                       │
+└─────────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────────┐
+│ 第 2 步：检查缓存（Redis）                             │
+│                                                         │
+│ GET search_cache:md5(query) → 如果存在直接返回！      │
+│ ↓ 缓存命中率通常 30-50%（多人查同一问题）             │
+│ ↓ 如果缓存存在，直接返回，省去搜索和 LLM              │
+│                                                         │
+│ [Redis] ← 缓存查询用时：2ms                            │
+│ [跳过步骤 3-5，直接返回结果]                          │
+└─────────────────────────────────────────────────────────┘
+                      ↓ (缓存未命中时继续)
+┌─────────────────────────────────────────────────────────┐
+│ 第 3 步：生成查询向量（本地 Embedding 模型）           │
+│                                                         │
+│ embedding_model.encode("什么是 RAG？") → [0.1, 0.2, ...]│
+│ 维度：768（与索引时相同）                             │
+│                                                         │
+│ [内存中] ← 向量生成用时：10-50ms                      │
+└─────────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────────┐
+│ 第 4 步：向量搜索（向量数据库）                        │
+│                                                         │
+│ POST Elasticsearch/v1/search {                          │
+│     "query": {                                          │
+│         "knn": {                                        │
+│             "embedding": {                             │
+│                 "vector": [0.1, 0.2, ...],            │
+│                 "k": 10                                │
+│             }                                          │
+│         },                                             │
+│         "bool": {                                      │
+│             "must": [{"match": {"content": "RAG"}}]   │
+│         }                                              │
+│     }                                                  │
+│ }                                                      │
+│                                                         │
+│ → 返回 Top-10 chunks（向量相似度最高）                 │
+│   - chunk_001: 相似度 0.92                             │
+│   - chunk_025: 相似度 0.87                             │
+│   - chunk_083: 相似度 0.81                             │
+│   - ...                                                │
+│                                                         │
+│ [向量数据库] ← 搜索用时：50-200ms                      │
+└─────────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────────┐
+│ 第 5 步：重排（可选，如果配置了）                      │
+│                                                         │
+│ POST rerank_api {                                       │
+│     "query": "什么是 RAG？",                            │
+│     "documents": [chunk_001, chunk_025, chunk_083, ...] │
+│ }                                                       │
+│                                                         │
+│ → 返回重排后的顺序（更精准）                           │
+│                                                         │
+│ [Reranker] ← 重排用时：100-500ms（如果用 API）        │
+└─────────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────────┐
+│ 第 6 步：构建提示词、调用 LLM                          │
+│                                                         │
+│ prompt = f"""                                           │
+│ 你是一个有帮助的 AI 助手。                            │
+│ 根据以下文档片段回答问题：                           │
+│                                                         │
+│ 文档：{chunks_content}                                  │
+│ 问题：什么是 RAG？                                     │
+│ 回答：                                                 │
+│ """                                                    │
+│                                                         │
+│ response = llm.complete(prompt)                         │
+│                                                         │
+│ [LLM API] ← LLM 推理用时：1-5s                         │
+└─────────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────────┐
+│ 第 7 步：保存结果和日志                                │
+│                                                         │
+│ [关系数据库] INSERT into api_logs {                     │
+│     user_id: "user_123",                               │
+│     query: "什么是 RAG？",                             │
+│     tokens_used: 245,                                  │
+│     timestamp: now()                                   │
+│ }                                                      │
+│                                                         │
+│ [Redis] SET search_cache:{hash} = result, ex=300       │
+│                                                         │
+│ [对象存储] PUT /cache/queries/query_hash_123.json      │
+│ （可选，保存搜索结果供审查）                          │
+│                                                         │
+│ [多个存储] ← 日志写入用时：10-50ms                     │
+└─────────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────────┐
+│ 第 8 步：返回给用户                                    │
+│                                                         │
+│ {                                                      │
+│     "code": 0,                                         │
+│     "message": "success",                              │
+│     "data": {                                          │
+│         "answer": "RAG 是检索增强生成...",            │
+│         "chunks": [...],                               │
+│         "used_tokens": 245                             │
+│     }                                                  │
+│ }                                                      │
+│                                                         │
+│ 总耗时：缓存命中时 ~50ms，缓存未命中时 ~2s            │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 💡 数据库选择决策表
+
+```
+┌──────────────────┬────────────────┬────────────────┬────────────────┐
+│ 应用规模         │ 向量数据库     │ 关系数据库     │ Redis / 对象存储│
+├──────────────────┼────────────────┼────────────────┼────────────────┤
+│ 个人 / 演示      │ Infinity       │ SQLite         │ 可选            │
+│ (< 1 千 chunks)  │ (Docker)       │ (本地文件)     │                 │
+├──────────────────┼────────────────┼────────────────┼────────────────┤
+│ 小团队           │ Infinity       │ PostgreSQL     │ Redis (可选)    │
+│ (< 10 万 chunks) │ (单机)         │ (Docker)       │ MinIO (可选)   │
+├──────────────────┼────────────────┼────────────────┼────────────────┤
+│ 中等企业         │ Elasticsearch  │ PostgreSQL     │ Redis + MinIO   │
+│ (< 1000 万       │ (3 节点集群)   │ (主从)         │ (必须)          │
+│  chunks)         │                │                │                 │
+├──────────────────┼────────────────┼────────────────┼────────────────┤
+│ 大型企业 / SaaS  │ Elasticsearch  │ PostgreSQL     │ Redis + S3/OSS  │
+│ (> 1 亿 chunks)  │ (多区域集群)   │ (高可用)       │ (完整方案)      │
+└──────────────────┴────────────────┴────────────────┴────────────────┘
+```
+
+---
+
+### ⚠️ 常见错误和优化
+
+| 错误做法 | 后果 | 正确做法 |
+|--------|------|--------|
+| 把所有数据存到 PostgreSQL | 性能爆炸 | 按类型分散：向量→向量库，文件→对象存储 |
+| 没有 Redis 缓存 | P99 延迟 10s | 加 Redis 缓存热查询，P99 降到 200ms |
+| 向量库关闭 embedding cache | 重复计算浪费 GPU | 启用 embedding 缓存，减少计算 50% |
+| 对象存储用 PostgreSQL BLOB | 数据库胀到 500GB | 迁移到 MinIO/S3，节省 99% 成本 |
+| 不删除过期日志 | 关系数据库爆满 | 配置自动归档，定期清理 |
+
+---
+
+### 🚀 RAGFlow 中的完整配置示例
+
+```yaml
+# 典型的 docker-compose.yml
+
+services:
+  # 向量数据库
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+  # 关系数据库
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_DB=ragflow
+      - POSTGRES_USER=ragflow
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 缓存层
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # 对象存储
+  minio:
+    image: minio/minio:latest
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/minio_data
+
+volumes:
+  elasticsearch_data:
+  postgres_data:
+  redis_data:
+  minio_data:
+```
+
+**启动后，RAGFlow 会自动**：
+1. 在 Elasticsearch 中创建 `chunks` index（向量索引）
+2. 在 PostgreSQL 中创建 `users`, `documents`, `api_logs` 表
+3. 使用 Redis 缓存热查询
+4. 使用 MinIO 存储原始文件和 embedding 缓存
+
+---
+
 ## 🎯 一句话总结
 
 **RAGFlow = 帮你把海量文档变成一个聪明的 AI 助手的框架**
