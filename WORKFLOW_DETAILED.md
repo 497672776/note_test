@@ -2,6 +2,9 @@
 
 ## 目录
 1. [文档上传工作流](#文档上传工作流)
+   - [文档解析详解（manual.py）](#第-25-步文档解析manualpy-实现详解)
+   - [PDF 处理流程](#pdf-解析流程pdf-类)
+   - [DOCX 处理流程](#docx-解析流程docx-类)
 2. [对话查询工作流](#对话查询工作流)
 3. [系统架构数据流](#系统架构数据流)
 4. [性能分析](#性能分析)
@@ -151,6 +154,391 @@ OCR 识别的文本
 ┌─────────────────────────────────┐
 │ 生成向量并存入 Elasticsearch      │
 └─────────────────────────────────┘
+```
+
+---
+
+#### 第 2.5 步：文档解析（manual.py 实现详解）
+
+RAGFlow 的文档解析核心逻辑在 `ragflow/rag/app/manual.py`，支持 PDF 和 DOCX 两种格式。
+
+**PDF 解析流程（Pdf 类）**：
+
+```python
+class Pdf(PdfParser):
+    def __call__(self, filename, binary=None, from_page=0,
+                 to_page=100000, zoomin=3, callback=None):
+
+        # 第 1 阶段：OCR 识别（如果是扫描 PDF）
+        self.__images__(
+            filename if not binary else binary,
+            zoomin,
+            from_page,
+            to_page,
+            callback
+        )
+        callback(msg="OCR finished")
+
+        # 第 2 阶段：版面分析（识别标题、正文、表格位置）
+        self._layouts_rec(zoomin)
+        callback(0.65, "Layout analysis")
+
+        # 第 3 阶段：表格识别和提取
+        self._table_transformer_job(zoomin)
+        callback(0.67, "Table analysis")
+
+        # 第 4 阶段：文本合并和清理
+        self._text_merge()
+        tbls = self._extract_table_figure(True, zoomin, True, True)
+        self._concat_downward()
+        self._filter_forpages()
+        callback(0.68, "Text merged")
+
+        # 清理多余空格
+        for b in self.boxes:
+            b["text"] = re.sub(r"([\t 　]|\u3000){2,}", " ", b["text"].strip())
+
+        # 返回：[(文本, 版面号, 位置信息), ...], 表格列表
+        return [(b["text"], b.get("layoutno", ""), self.get_position(b, zoomin))
+                for i, b in enumerate(self.boxes)], tbls
+```
+
+**PDF 处理流程的 4 个阶段**：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ 阶段 1：OCR 识别（Optical Character Recognition）       │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│ 用途：将 PDF 中的图像转换为可搜索的文本                  │
+│                                                          │
+│ 工作原理：                                               │
+│ 1. 按设定的缩放倍数（zoomin）放大页面                   │
+│    - zoomin=3 表示 300% 放大，更清晰的 OCR              │
+│    - 放大后对低分辨率 PDF 有帮助                        │
+│                                                          │
+│ 2. 逐页调用 OCR 引擎（Tesseract/PaddleOCR）            │
+│    - 识别文字并标记位置（bounding box）                 │
+│    - 识别文字方向（左->右、上->下、竖直等）            │
+│                                                          │
+│ 3. 生成 boxes 列表                                       │
+│    boxes = [                                             │
+│        {                                                 │
+│            "text": "第一章 基本介绍",                  │
+│            "x0": 100,                                    │
+│            "y0": 50,                                     │
+│            "x1": 400,                                    │
+│            "y1": 100,                                    │
+│            "page": 0                                     │
+│        },                                                │
+│        ...                                               │
+│    ]                                                     │
+│                                                          │
+│ 耗时：大多数时间花在这里（2-3 分钟）                    │
+└──────────────────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────────────────┐
+│ 阶段 2：版面分析（Layout Recognition）                  │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│ 用途：识别 PDF 中的结构（标题、正文、表格、图片）       │
+│                                                          │
+│ 工作原理：                                               │
+│ 1. 使用深度学习模型识别区域类型                         │
+│    - Text（正文）                                       │
+│    - Title（标题）                                      │
+│    - Table（表格）                                      │
+│    - Figure（图片）                                     │
+│    - Header/Footer（页眉页脚）                          │
+│                                                          │
+│ 2. 按逻辑顺序排列 boxes                                  │
+│    - 从上到下，从左到右                                 │
+│    - 标题优先级最高                                     │
+│                                                          │
+│ 3. 记录版面信息（layoutno）                             │
+│    - 用于后续的层级识别                                 │
+│                                                          │
+│ 例子：                                                   │
+│ Box 1: "第一章"    → layoutno = "title_level_1"         │
+│ Box 2: "第 1.1 节" → layoutno = "title_level_2"         │
+│ Box 3: "本节内容..." → layoutno = "text"                │
+│ Box 4: "[表格]"    → layoutno = "table"                 │
+│                                                          │
+│ 耗时：50-100ms（相对快速）                              │
+└──────────────────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────────────────┐
+│ 阶段 3：表格识别（Table Analysis）                      │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│ 用途：识别和提取表格结构                                 │
+│                                                          │
+│ 工作原理：                                               │
+│ 1. 检测表格边界（线条识别）                             │
+│    - 水平线、竖直线的交点形成单元格                     │
+│                                                          │
+│ 2. 识别单元格合并（colspan, rowspan）                  │
+│    - 检测相同的单元格内容 → 标记为合并                 │
+│                                                          │
+│ 3. 提取表格数据                                         │
+│    - 每行 → [单元格1, 单元格2, ...]                     │
+│    - 返回 HTML 格式：<table><tr><td>...</td></tr></table>│
+│                                                          │
+│ 输出格式：                                               │
+│ tbls = [                                                │
+│     ((img, html_str), page_info),                       │
+│     ...                                                  │
+│ ]                                                        │
+│ 其中：                                                   │
+│   - img: 表格的图片（用于显示）                         │
+│   - html_str: 表格 HTML（用于文本提取）                │
+│   - page_info: 页码和位置信息                           │
+│                                                          │
+│ 耗时：100-200ms                                         │
+└──────────────────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────────────────┐
+│ 阶段 4：文本合并和清理（Text Merge）                    │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│ 用途：将零散的 boxes 组合成完整的文本段落              │
+│                                                          │
+│ 工作原理：                                               │
+│ 1. _text_merge()：按逻辑顺序合并 boxes                 │
+│    - 同一段落的 boxes 合并成一行                        │
+│    - 保留段落之间的换行符                               │
+│                                                          │
+│ 2. _extract_table_figure()：提取表格和图片             │
+│    - 分离出表格和图片数据                               │
+│    - 减少干扰信息                                       │
+│                                                          │
+│ 3. _concat_downward()：垂直合并                        │
+│    - 将相邻的 boxes 合并                                │
+│    - 例如：["标题1", "内容"] → ["标题1\n内容"]          │
+│                                                          │
+│ 4. 清理空格                                             │
+│    - 去除多余的空格、制表符、全角空格                   │
+│    - re.sub(r"([\t 　]|\u3000){2,}", " ", text)        │
+│                                                          │
+│ 输出：                                                   │
+│ sections = [                                            │
+│     ("第一章 基本介绍\n本章介绍...", "title_level_1",   │
+│      [(0, 100, 50, 400, 100), ...]),  # 位置信息         │
+│     ...                                                  │
+│ ]                                                        │
+│                                                          │
+│ 耗时：50-100ms                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+**DOCX 解析流程（Docx 类）**：
+
+```python
+class Docx(DocxParser):
+    def __call__(self, filename, binary=None, from_page=0,
+                 to_page=100000, callback=None):
+
+        # 加载 DOCX 文件
+        self.doc = Document(filename) if not binary else Document(BytesIO(binary))
+
+        ti_list = []  # (text, image) 对
+        question_stack = []  # 当前的问题堆栈（多级标题）
+        level_stack = []  # 当前的级别堆栈
+
+        for p in self.doc.paragraphs:
+            # 检查段落是否是标题（通过 docx_question_level 函数）
+            question_level, p_text = docx_question_level(p)
+
+            if not question_level or question_level > 6:  # 不是标题，是内容
+                # 累积答案文本
+                last_answer = f'{last_answer}\n{p_text}'
+                # 累积该段的图片
+                current_image = self.get_picture(self.doc, p)
+                last_image = self.concat_img(last_image, current_image)
+            else:  # 是标题
+                # 保存之前的答案
+                if last_answer or last_image:
+                    sum_question = '\n'.join(question_stack)
+                    if sum_question:
+                        ti_list.append((f'{sum_question}\n{last_answer}', last_image))
+
+                # 维护问题堆栈（去除比当前级别低的问题）
+                while question_stack and question_level <= level_stack[-1]:
+                    question_stack.pop()
+                    level_stack.pop()
+
+                # 添加当前标题
+                question_stack.append(p_text)
+                level_stack.append(question_level)
+
+        # 处理最后一个段落
+        if last_answer:
+            sum_question = '\n'.join(question_stack)
+            if sum_question:
+                ti_list.append((f'{sum_question}\n{last_answer}', last_image))
+
+        # 提取表格
+        tbls = []
+        for tb in self.doc.tables:
+            html = "<table>"
+            for r in tb.rows:
+                html += "<tr>"
+                for c in r.cells:
+                    html += f"<td>{c.text}</td>"
+                html += "</tr>"
+            html += "</table>"
+            tbls.append(((None, html), ""))
+
+        return ti_list, tbls
+```
+
+**DOCX 处理流程的关键点**：
+
+```
+DOCX 特点：结构化格式，包含段落、表格、图片等元素
+
+解析思路：
+├─ 问题堆栈方式识别层级
+│  ├─ 读取 <w:pStyle val="Heading1"/> 等样式
+│  ├─ 问题级别 (question_level) 决定了层级深度
+│  │  - level=1: 最高级标题（章）
+│  │  - level=2: 次级标题（节）
+│  │  - level=3: 更低级（小节）
+│  │  - level>6: 不是标题，是正文
+│  │
+│  └─ 堆栈维护：保存当前的问题链路
+│     问题堆栈示例：
+│     ["第一章", "第 1.1 节", "第 1.1.1 小节"]
+│                 ↑
+│         当前正在读这些内容的答案
+│
+├─ 答案累积
+│  ├─ 读到新的标题时，保存之前的答案
+│  ├─ 同时合并堆栈中的所有问题（多级标题）
+│  └─ 输出格式：
+│     "第一章\n第 1.1 节\n第 1.1.1 小节\n[内容文本]"
+│
+└─ 图片处理
+   ├─ 每段可能包含图片
+   ├─ 使用 get_picture() 提取
+   ├─ 使用 concat_img() 合并多张图片
+   └─ 与文本一起保存为 (text, image) 对
+
+例子：
+原始 DOCX：
+  # 第一章：基础概念
+  这一章讲解基础知识
+  [图片1]
+  ## 第 1.1 节：定义
+  定义就是...
+  [图片2]
+  内容继续...
+
+处理结果：
+  ti_list = [
+      ("第一章：基础概念\n这一章讲解基础知识", 图片1),
+      ("第一章：基础概念\n第 1.1 节：定义\n定义就是...", 图片2),
+      ("第一章：基础概念\n第 1.1 节：定义\n内容继续...", None)
+  ]
+```
+
+**chunk() 函数的分块逻辑**：
+
+```python
+def chunk(filename, binary=None, from_page=0, to_page=100000,
+          lang="Chinese", callback=None, **kwargs):
+
+    parser_config = kwargs.get("parser_config", {
+        "chunk_token_num": 512,           # 每个 chunk 目标 token 数
+        "delimiter": "\n!?。；！？",      # 分句符号
+        "layout_recognize": "DeepDOC"     # 版面识别方法
+    })
+
+    # 处理文件名（提取文档名）
+    doc["docnm_kwd"] = filename
+    doc["title_tks"] = rag_tokenizer.tokenize(filename)
+
+    if re.search(r"\.pdf$", filename, re.IGNORECASE):
+        # PDF 解析...
+        sections, tbls = pdf_parser(filename, ...)
+
+        # 第 1 步：识别章节级别（section_id）
+        # 目的：区分不同的主要段落（通常按标题分）
+        sec_ids = []
+        sid = 0
+        for i, lvl in enumerate(levels):
+            if lvl <= most_level and i > 0 and lvl != levels[i - 1]:
+                sid += 1  # 遇到新的主标题，section_id 增加
+            sec_ids.append(sid)
+
+        # 第 2 步：合并分块（chunk merging）
+        chunks = []
+        last_sid = -2
+        tk_cnt = 0
+        for txt, sec_id, poss in sorted(sections, ...):
+            # 合并逻辑：
+            # - 如果 token 数 < 32，强制合并（太小的内容）
+            # - 如果 token 数 < 1024 且在同一 section，继续合并
+            # - 否则创建新 chunk
+
+            if tk_cnt < 32 or (tk_cnt < 1024 and (sec_id == last_sid or sec_id == -1)):
+                chunks[-1] += "\n" + txt + poss  # 合并到上一个 chunk
+                tk_cnt += num_tokens_from_string(txt)
+            else:
+                chunks.append(txt + poss)  # 创建新 chunk
+                tk_cnt = num_tokens_from_string(txt)
+                last_sid = sec_id
+
+        # 第 3 步：分词和向量化
+        res = tokenize_table(tbls, doc, eng)
+        res.extend(tokenize_chunks(chunks, doc, eng, pdf_parser))
+        return res
+
+    elif re.search(r"\.docx?$", filename, re.IGNORECASE):
+        # DOCX 解析...
+        ti_list, tbls = docx_parser(filename, ...)
+
+        # 处理每个 (text, image) 对
+        for text, image in ti_list:
+            d = copy.deepcopy(doc)
+            if image:
+                d['image'] = image
+                d["doc_type_kwd"] = "image"
+            tokenize(d, text, eng)
+            res.append(d)
+        return res
+```
+
+**分块策略详解**：
+
+```
+目标：平衡内容完整性和 chunk 大小
+
+token_num = 512  （默认配置）
+
+分块逻辑流程：
+
+第 1 条内容（标题）
+  200 tokens  ┐
+              ├─ 总 300 tokens < 512 → 继续合并
+第 2 条内容  │
+  100 tokens ┘
+              → 合并到一个 chunk
+
+第 3 条内容
+  600 tokens  → 超过 512，创建新 chunk
+
+结果：
+  Chunk 1: (200 + 100 = 300 tokens)
+  Chunk 2: (600 tokens)
+
+边界情况处理：
+├─ token < 32：强制合并（太小的内容，保留上下文）
+├─ 32 ≤ token < 1024：
+│  ├─ 如果与上一个在同一 section → 继续合并
+│  └─ 如果是表格（sec_id == -1）→ 继续合并
+├─ token ≥ 1024：创建新 chunk（即使有内容要合并）
+└─ 目的：避免 chunk 过大导致嵌入模型溢出
 ```
 
 ---
