@@ -3337,6 +3337,239 @@ scores = reranker.similarity(
 
 ---
 
+### 📚 什么是 kb_ids？知识库的核心概念
+
+你问的这个变量很关键！让我深入解释 `kb_ids` 是什么：
+
+#### 定义：Knowledge Base IDs（知识库标识符）
+
+```python
+kb_ids = ["kb_123", "kb_456"]
+# 不是：kb_ids = "kb_123"（只有一个）
+# 而是：kb_ids = [...]（可能有多个！）
+```
+
+**kb_ids 的含义**：
+- **kb** = Knowledge Base（知识库）
+- **ids** = identifiers（标识符）
+- **kb_ids** = 一个或多个知识库的 ID 列表
+
+#### 什么是知识库（Knowledge Base）？
+
+想象 RAGFlow 是一个 **文档管理系统**：
+
+```
+┌─────────────────────────────────────────────┐
+│ 用户 user_123                               │
+├─────────────────────────────────────────────┤
+│                                             │
+│  知识库 1: "产品文档"                       │
+│  ├─ 文档 A: user_manual.pdf                │
+│  ├─ 文档 B: api_docs.md                   │
+│  └─ 文档 C: faq.txt                       │
+│  → kb_id = "kb_123"                        │
+│                                             │
+│  知识库 2: "技术方案"                       │
+│  ├─ 文档 D: architecture.pdf               │
+│  ├─ 文档 E: deployment.md                 │
+│  └─ 文档 F: troubleshooting.txt            │
+│  → kb_id = "kb_456"                        │
+│                                             │
+│  知识库 3: "公司政策"                       │
+│  ├─ 文档 G: hr_policy.pdf                  │
+│  ├─ 文档 H: leave_policy.md               │
+│  └─ ...                                    │
+│  → kb_id = "kb_789"                        │
+│                                             │
+└─────────────────────────────────────────────┘
+```
+
+**一个用户可以有多个知识库！** 每个知识库存不同的文档集合。
+
+#### 为什么需要多个知识库？
+
+**真实场景**：一个公司有不同的文档类别
+
+```
+典型场景：
+  公司 = 某个 SaaS 的客户
+
+  知识库 1："产品文档"
+    - 用户手册、教程、最佳实践
+    - 给"客户支持"团队用
+
+  知识库 2："技术文档"
+    - API 文档、部署指南、架构设计
+    - 给"开发工程师"用
+
+  知识库 3："销售资料"
+    - 产品演示、定价、案例研究
+    - 给"销售团队"用
+
+每个团队的员工搜索时，只想在自己的知识库里找答案！
+```
+
+#### kb_ids 在搜索中的作用
+
+**搜索时指定知识库的两种方式**：
+
+**方式 1：搜索单个知识库**
+```python
+# 用户只想在"产品文档"知识库里搜索
+question = "怎样重置密码？"
+kb_ids = ["kb_123"]  # ← 只指定一个
+top_k = 10
+
+# Elasticsearch 会只搜这个知识库里的 chunks
+# WHERE kb_id = "kb_123" AND content LIKE "%密码%"
+```
+
+**方式 2：搜索多个知识库**
+```python
+# 用户想同时搜"产品文档"和"技术文档"
+question = "什么是 API？"
+kb_ids = ["kb_123", "kb_456"]  # ← 指定多个！
+top_k = 10
+
+# Elasticsearch 会搜这两个知识库
+# WHERE kb_id IN ("kb_123", "kb_456") AND content LIKE "%API%"
+
+# 返回的 10 个 chunks 可能来自两个知识库的混合
+```
+
+#### 代码层面的实现
+
+**在 Elasticsearch 的 filter 中**（es_conn.py:165）：
+
+```python
+# RAGFlow 代码位置：/rag/utils/es_conn.py:164-182
+condition["kb_id"] = knowledgebaseIds  # ← kb_ids 在这里被设置
+
+for k, v in condition.items():
+    if k == "kb_id":
+        if isinstance(v, list):
+            # 如果是列表（多个知识库），使用 terms 查询
+            bqry.filter.append(Q("terms", kb_id=v))
+            # 等价于 SQL: WHERE kb_id IN (kb_123, kb_456)
+```
+
+#### 缓存键为什么包含 kb_ids？
+
+```python
+# 这就是为什么缓存键需要包含 kb_ids：
+cache_key = md5(f"{question}_{kb_ids}_{top_k}".encode()).hexdigest()
+
+# 例子：
+# Case 1: 问"什么是 RAG？"在 kb_123
+#   cache_key_1 = md5("什么是 RAG？_['kb_123']_10") = "abc123..."
+#
+# Case 2: 问"什么是 RAG？"在 kb_456
+#   cache_key_2 = md5("什么是 RAG？_['kb_456']_10") = "def456..."
+#
+# Case 3: 问"什么是 RAG？"在 kb_123 和 kb_456
+#   cache_key_3 = md5("什么是 RAG？_['kb_123','kb_456']_10") = "ghi789..."
+
+# 三个不同的缓存键！因为同一个问题在不同知识库的答案可能不同！
+```
+
+#### 真实例子：多知识库搜索
+
+```
+场景：用户搜索"RAG 是什么？"
+
+User A：只在"产品文档"知识库搜
+  kb_ids = ["kb_123"]
+  ↓
+  返回来自"产品文档"的 RAG 定义
+  "RAG 是我们产品的核心功能..."
+
+User B：只在"技术文档"知识库搜
+  kb_ids = ["kb_456"]
+  ↓
+  返回来自"技术文档"的 RAG 解释
+  "RAG（Retrieval-Augmented Generation）是一种深度学习技术..."
+
+User C：同时在两个知识库搜
+  kb_ids = ["kb_123", "kb_456"]
+  ↓
+  返回混合结果：
+  - 前 5 个来自"产品文档"（可能相关度更高）
+  - 后 5 个来自"技术文档"（补充细节）
+```
+
+#### 数据库层面：kb_ids 的存储
+
+在 PostgreSQL 中（knowledge_bases 表）：
+
+```sql
+-- PostgreSQL 存储（来自 es_conn.py:165）
+SELECT * FROM knowledge_bases
+WHERE kb_id IN ('kb_123', 'kb_456');
+
+-- 结果：
+-- kb_id  | kb_name      | owner_id | parser_id | embedding_model
+-- ───────┼──────────────┼──────────┼──────────┼─────────────────
+-- kb_123 | 产品文档      | user_123 | naive    | BAAI/bge-large
+-- kb_456 | 技术文档      | user_123 | hier     | BAAI/bge-large
+
+-- 每个知识库有自己的配置！
+```
+
+在 Elasticsearch 中（chunks 存储）：
+
+```json
+// 每个 chunk 都有 kb_id 字段
+{
+  "chunk_id": "chunk_abc",
+  "kb_id": "kb_123",        // ← 标记属于哪个知识库
+  "doc_id": "doc_001",
+  "content": "RAG 是产品的核心...",
+  "embedding": [0.123, -0.456, ...],
+  "metadata": {
+    "page": 5,
+    "source": "user_manual.pdf"
+  }
+}
+
+// 搜索时：WHERE kb_id IN ('kb_123', 'kb_456')
+// 只会返回这两个知识库的 chunks
+```
+
+#### kb_ids vs kb_id 的区别
+
+| 名称 | 类型 | 含义 | 例子 |
+|-----|------|------|------|
+| **kb_id** | 单个 ID | 一个知识库的 ID | `"kb_123"` |
+| **kb_ids** | 列表 | 一个或多个知识库的 ID | `["kb_123", "kb_456"]` |
+
+```python
+# 错误的用法：
+kb_id = ["kb_123", "kb_456"]  # ❌ 混淆了命名
+
+# 正确的用法：
+kb_ids = ["kb_123", "kb_456"]  # ✓ 表示多个
+kb_id = "kb_123"               # ✓ 表示单个
+```
+
+#### 为什么在缓存例子中用多个知识库？
+
+在我们的例子中：
+```python
+kb_ids = ["kb_123", "kb_456"]
+```
+
+这表示用户在进行**跨知识库搜索**：
+- 既要在"产品文档"知识库搜
+- 也要在"技术文档"知识库搜
+- 一次查询返回合并的结果
+
+**这为什么重要？** 因为：
+1. **缓存需要精确区分**：同一个问题在不同知识库的答案不同
+2. **搜索需要过滤**：只搜索指定的知识库，不搜索其他知识库
+3. **权限控制**：用户只能搜他有权限的知识库
+
+---
+
 ### 🔄 完整流程：从问题到缓存
 
 现在让我展示整个 Redis 缓存流程的完整过程：
