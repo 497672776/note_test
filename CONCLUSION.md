@@ -6375,6 +6375,326 @@ admin> list services;
 
 ---
 
+## 🐍 Python SDK 使用完全指南
+
+### 安装和初始化
+
+**第一步：安装 SDK**
+```bash
+pip install ragflow-sdk
+```
+
+**第二步：导入和初始化**
+```python
+from ragflow_sdk import RAGFlow
+
+# 初始化 RAGFlow 客户端
+rag = RAGFlow(
+    api_key="YOUR_API_KEY",           # 从 RAGFlow 后台获取
+    base_url="http://localhost:8000"  # RAGFlow 服务地址
+)
+```
+
+### 核心对象关系图
+
+```
+RAGFlow（主入口）
+├── DataSet（知识库）
+│   ├── Document（文档）
+│   │   └── Chunk（文本块）
+│   └── list_documents()
+├── Chat（对话助手）
+│   ├── Session（对话会话）
+│   │   └── Message（对话消息）
+│   ├── LLM（大模型配置）
+│   └── Prompt（提示词配置）
+└── Agent（自主代理）
+```
+
+### 常见操作示例
+
+#### 1️⃣ 知识库管理
+
+**创建知识库**
+```python
+# 创建一个新知识库
+dataset = rag.create_dataset(
+    name="技术文档库",
+    description="公司的技术文档和使用指南",
+    embedding_model="BAAI/bge-small-en-v1.5@Builtin",  # 向量模型
+    chunk_method="book",  # 分割方法：naive, book, paper, qa, table 等
+    parser_config={
+        "chunk_token_num": 512,   # 每块大小（token）
+        "auto_keywords": 5,       # 自动生成关键词数
+        "auto_questions": 3,      # 自动生成问题数
+    }
+)
+print(f"知识库ID: {dataset.id}")
+print(f"知识库名: {dataset.name}")
+```
+
+**列表知识库**
+```python
+# 获取所有知识库
+datasets = rag.list_datasets(page=1, page_size=30)
+for ds in datasets:
+    print(f"{ds.name} - 文档数: {ds.document_count}, 块数: {ds.chunk_count}")
+```
+
+**获取特定知识库**
+```python
+# 按名称获取
+dataset = rag.get_dataset(name="技术文档库")
+
+# 按ID列出
+datasets = rag.list_datasets(id="dataset_id_here")
+```
+
+**更新知识库**
+```python
+# 修改知识库配置
+dataset.update({
+    "name": "技术文档库v2",
+    "description": "更新后的描述"
+})
+```
+
+#### 2️⃣ 文档管理
+
+**上传文档**
+```python
+# 准备文档列表（支持 PDF, Word, Excel, Markdown, HTML, JSON 等格式）
+documents = [
+    {
+        "display_name": "使用指南.pdf",
+        "blob": open("./guides/使用指南.pdf", "rb")
+    },
+    {
+        "display_name": "API文档.md",
+        "blob": open("./docs/API文档.md", "rb")
+    },
+]
+
+# 上传到知识库
+uploaded_docs = dataset.upload_documents(documents)
+for doc in uploaded_docs:
+    print(f"上传成功: {doc.name} (ID: {doc.id})")
+```
+
+**列表文档**
+```python
+# 获取知识库中的所有文档
+documents = dataset.list_documents(page=1, page_size=30)
+for doc in documents:
+    print(f"{doc.name} - 大小: {doc.size}字节, 状态: {doc.status}")
+```
+
+**删除文档**
+```python
+# 按ID删除文档
+document_ids = ["doc_id_1", "doc_id_2"]
+dataset.delete_documents(ids=document_ids)
+```
+
+#### 3️⃣ 对话助手创建
+
+**创建对话助手**
+```python
+# 基本创建
+chat = rag.create_chat(
+    name="技术支持助手",
+    dataset_ids=[dataset.id],  # 关联知识库
+    llm=rag.Chat.LLM(rag, {
+        "model_name": "glm-4@ZHIPU-AI",      # 使用的大模型
+        "temperature": 0.7,                   # 创意度 (0-1, 越高越创意)
+        "top_p": 0.9,                         # 概率质量
+        "max_tokens": 1024,                   # 最多生成token数
+    }),
+    prompt=rag.Chat.Prompt(rag, {
+        "similarity_threshold": 0.3,          # 相似度阈值
+        "top_k": 1024,                        # 检索结果数量
+        "top_n": 6,                           # 返回的结果数
+        "show_quote": True,                   # 是否显示引用
+        "prompt": "你是一个技术支持专家。基于以下知识库信息回答问题：\n{knowledge}"
+    })
+)
+print(f"助手ID: {chat.id}")
+```
+
+#### 4️⃣ 对话会话管理
+
+**创建对话会话**
+```python
+# 为某个助手创建一个新会话（相当于一个对话框）
+session = chat.create_session(name="用户咨询1")
+print(f"会话ID: {session.id}")
+```
+
+**发送消息并获取回复**
+```python
+# 在会话中提问
+response = session.chat(
+    user_input="如何使用 API？",
+    use_history=True  # 是否使用对话历史
+)
+print(f"回复: {response}")
+```
+
+**获取会话消息**
+```python
+# 列出某个会话的所有消息
+messages = session.list_messages(page=1, page_size=30)
+for msg in messages:
+    if msg.role == "user":
+        print(f"👤 用户: {msg.content}")
+    else:
+        print(f"🤖 助手: {msg.content}")
+```
+
+#### 5️⃣ 高级检索
+
+**直接检索知识库**
+```python
+# 不通过对话，直接从知识库检索
+chunks = rag.retrieve(
+    dataset_ids=[dataset.id],
+    question="什么是 RAGFlow？",
+    similarity_threshold=0.2,
+    top_k=1024,
+    vector_similarity_weight=0.5,  # 向量和关键词的权重平衡
+    keyword=True  # 是否启用关键词检索
+)
+
+print(f"检索到 {len(chunks)} 个相关块：")
+for chunk in chunks:
+    print(f"- {chunk.content[:100]}...")
+    print(f"  来自：{chunk.document_name}")
+    print(f"  相似度：{chunk.similarity_score}")
+```
+
+#### 6️⃣ 代理（Agent）管理
+
+**创建自主代理**
+```python
+# 定义代理的行为 DSL（领域特定语言）
+dsl = {
+    "nodes": [
+        {
+            "id": "start",
+            "type": "tool",
+            "tool_name": "retriever",
+            "config": {
+                "dataset_ids": [dataset.id],
+                "threshold": 0.3
+            }
+        },
+        {
+            "id": "llm",
+            "type": "model",
+            "model_name": "glm-4@ZHIPU-AI"
+        }
+    ],
+    "edges": [
+        {"from": "start", "to": "llm"}
+    ]
+}
+
+rag.create_agent(
+    title="自动分析代理",
+    dsl=dsl,
+    description="根据知识库自动分析和回答"
+)
+```
+
+**列表代理**
+```python
+agents = rag.list_agents(page=1, page_size=30)
+for agent in agents:
+    print(f"代理: {agent.title}")
+```
+
+### 完整工作流示例
+
+```python
+from ragflow_sdk import RAGFlow
+
+# 1. 初始化
+rag = RAGFlow(
+    api_key="your_api_key",
+    base_url="http://localhost:8000"
+)
+
+# 2. 创建知识库
+dataset = rag.create_dataset(
+    name="FAQ库",
+    chunk_method="qa"
+)
+
+# 3. 上传文档
+docs_to_upload = [{
+    "display_name": "faq.pdf",
+    "blob": open("faq.pdf", "rb")
+}]
+dataset.upload_documents(docs_to_upload)
+
+# 4. 创建对话助手
+chat = rag.create_chat(
+    name="FAQ助手",
+    dataset_ids=[dataset.id]
+)
+
+# 5. 开始对话
+session = chat.create_session(name="用户咨询")
+answer = session.chat(user_input="常见问题是什么？")
+print(answer)
+
+# 6. 查看对话历史
+messages = session.list_messages()
+for msg in messages:
+    print(f"{msg.role}: {msg.content}")
+```
+
+### 错误处理
+
+```python
+try:
+    dataset = rag.create_dataset(name="test")
+except Exception as e:
+    print(f"创建知识库失败: {e}")
+```
+
+### 关键参数说明
+
+| 参数 | 说明 | 示例值 |
+|-----|------|--------|
+| `chunk_method` | 分割方法 | naive, book, paper, email, qa, table, tag |
+| `embedding_model` | 向量模型 | BAAI/bge-small-en-v1.5@Builtin |
+| `temperature` | 生成创意度 | 0.1-0.9（越高越创意） |
+| `similarity_threshold` | 相似度阈值 | 0.2-0.5 |
+| `top_k` | 检索候选数 | 500-2048 |
+| `top_n` | 返回结果数 | 1-20 |
+
+### 常见问题
+
+**Q: API Key 在哪里获取？**
+A: 登录 RAGFlow Web 界面，进入「用户设置」→「API Key」生成。
+
+**Q: 支持哪些文件格式？**
+A: PDF、Word（.docx）、Excel（.xlsx）、PowerPoint、Markdown、HTML、JSON、纯文本等。
+
+**Q: 如何选择分割方法？**
+A:
+- `naive`：通用文本
+- `book`：书籍/长文章
+- `paper`：学术论文
+- `qa`：问答对格式
+- `table`：表格数据
+
+**Q: 模型名称怎么填？**
+A: 格式为 `模型名@提供商`，如 `glm-4@ZHIPU-AI`、`gpt-4@OpenAI`
+
+---
+
 **分析时间**：2025-11-02
 **项目**：RAGFlow（InfiniFlow）
 **许可**：Apache 2.0
