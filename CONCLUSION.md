@@ -3113,6 +3113,357 @@ CREATE TABLE api_logs (
 
 **RAGFlow 的选择**：默认推荐 PostgreSQL（见代码中的 Peewee ORM）
 
+#### 🔍 PostgreSQL 在 RAGFlow 中的深度技术架构
+
+**核心职责**：作为 RAGFlow 的"大脑中枢"，存储所有结构化元数据和业务逻辑数据。
+
+##### 📊 数据库模式设计（Database Schema）
+
+**主要表结构**：
+
+```sql
+-- 1. 用户和权限管理
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    nickname VARCHAR(100),
+    password_hash VARCHAR(255),
+    avatar TEXT,
+    language VARCHAR(10) DEFAULT 'en',
+    timezone VARCHAR(50) DEFAULT 'UTC',
+    is_superuser BOOLEAN DEFAULT FALSE,
+    status INTEGER DEFAULT 1,  -- 1:active, 0:inactive
+    created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. 知识库管理（核心表）
+CREATE TABLE knowledge_bases (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    language VARCHAR(10) DEFAULT 'English',
+    owner_id UUID REFERENCES users(id),
+    tenant_id UUID,
+    embedding_model VARCHAR(255),  -- 如 "BAAI/bge-large-en-v1.5"
+    chunk_method VARCHAR(50),      -- naive_merge, hierarchical_merge
+    parser_config JSONB,           -- 解析器配置（PostgreSQL 特有）
+    chunk_token_count INTEGER DEFAULT 128,
+    chunk_token_num INTEGER DEFAULT 1024,
+    similarity_threshold FLOAT DEFAULT 0.2,
+    vector_similarity_weight FLOAT DEFAULT 0.3,
+    status INTEGER DEFAULT 1,
+    created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. 文档管理
+CREATE TABLE documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kb_id UUID REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    type VARCHAR(50),              -- pdf, docx, txt, md
+    size BIGINT,                   -- 文件大小（字节）
+    location VARCHAR(500),         -- MinIO/S3 存储路径
+    parser_id VARCHAR(100),        -- 解析器类型
+    parser_config JSONB,
+    source_type VARCHAR(50) DEFAULT 'upload',
+    run INTEGER DEFAULT 0,         -- 处理状态：0=待处理, 1=处理中, 2=完成, -1=失败
+    progress FLOAT DEFAULT 0.0,    -- 处理进度 0.0-1.0
+    progress_msg TEXT,             -- 进度消息
+    chunk_num INTEGER DEFAULT 0,   -- 生成的 chunk 数量
+    token_num INTEGER DEFAULT 0,   -- 总 token 数
+    thumbnail VARCHAR(500),        -- 缩略图路径
+    created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. 对话管理
+CREATE TABLE conversations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id),
+    name VARCHAR(255),
+    icon VARCHAR(255),
+    knowledgebase_ids TEXT[],      -- PostgreSQL 数组类型
+    llm JSONB,                     -- LLM 配置
+    prompt JSONB,                  -- 提示词配置
+    similarity_threshold FLOAT DEFAULT 0.2,
+    vector_similarity_weight FLOAT DEFAULT 0.3,
+    top_n INTEGER DEFAULT 6,
+    top_k INTEGER DEFAULT 1024,
+    rerank_id VARCHAR(255),
+    created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. 消息历史
+CREATE TABLE messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL,     -- user, assistant, system
+    content TEXT NOT NULL,
+    reference JSONB,               -- 引用的文档片段
+    message_id VARCHAR(255),       -- 前端消息 ID
+    parent_id UUID REFERENCES messages(id),  -- 支持消息树结构
+    created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 6. API 密钥管理
+CREATE TABLE api_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id),
+    api_key VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(100),
+    usage_count BIGINT DEFAULT 0,
+    last_used_time TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+##### 🔧 PostgreSQL 特有功能的使用
+
+**1. JSONB 数据类型**（MySQL 不支持）：
+```sql
+-- 存储复杂配置，支持高效查询和索引
+SELECT * FROM knowledge_bases
+WHERE parser_config @> '{"chunk_overlap": 50}';
+
+-- 更新 JSON 字段的特定键
+UPDATE knowledge_bases
+SET parser_config = parser_config || '{"new_setting": "value"}'
+WHERE id = 'kb_123';
+```
+
+**2. 数组类型**：
+```sql
+-- 一个对话可以关联多个知识库
+SELECT * FROM conversations
+WHERE 'kb_123' = ANY(knowledgebase_ids);
+
+-- 添加知识库到对话
+UPDATE conversations
+SET knowledgebase_ids = array_append(knowledgebase_ids, 'kb_456')
+WHERE id = 'conv_123';
+```
+
+**3. UUID 主键**：
+```sql
+-- 自动生成全局唯一 ID，分布式友好
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+INSERT INTO users (email) VALUES ('user@example.com');
+-- 自动生成：550e8400-e29b-41d4-a716-446655440000
+```
+
+**4. 全文搜索**（内置，无需额外组件）：
+```sql
+-- 创建全文搜索索引
+CREATE INDEX idx_documents_search ON documents
+USING gin(to_tsvector('english', name || ' ' || COALESCE(description, '')));
+
+-- 搜索文档
+SELECT * FROM documents
+WHERE to_tsvector('english', name) @@ plainto_tsquery('english', 'machine learning');
+```
+
+##### ⚡ 性能优化策略
+
+**1. 索引设计**：
+```sql
+-- 复合索引：按知识库查询文档（最常用）
+CREATE INDEX idx_docs_kb_status ON documents(kb_id, run, created_time DESC);
+
+-- 部分索引：只索引活跃数据
+CREATE INDEX idx_active_conversations ON conversations(user_id, updated_time DESC)
+WHERE status = 1;
+
+-- GIN 索引：JSONB 查询优化
+CREATE INDEX idx_kb_parser_config ON knowledge_bases USING gin(parser_config);
+```
+
+**2. 分区表**（大数据量优化）：
+```sql
+-- 按时间分区消息表
+CREATE TABLE messages_2024_01 PARTITION OF messages
+FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+
+CREATE TABLE messages_2024_02 PARTITION OF messages
+FOR VALUES FROM ('2024-02-01') TO ('2024-03-01');
+```
+
+**3. 连接池配置**：
+```python
+# RAGFlow 中的数据库连接配置
+DATABASE = {
+    'name': 'ragflow',
+    'user': 'postgres',
+    'password': 'infini_rag_flow',
+    'host': 'postgres',
+    'port': 5432,
+    'max_connections': 20,        # 连接池大小
+    'stale_timeout': 300,         # 连接超时
+    'timeout': 30,                # 查询超时
+    'autorollback': True,         # 自动回滚
+    'pragmas': {
+        'journal_mode': 'wal',    # Write-Ahead Logging
+        'cache_size': -1024 * 64, # 64MB 缓存
+    }
+}
+```
+
+##### 🔄 与其他组件的数据流
+
+**文档上传流程**：
+```
+1. [Web UI] 用户上传 PDF
+   ↓
+2. [PostgreSQL] INSERT INTO documents (kb_id, name, type, status=0)
+   ↓
+3. [MinIO] 存储原始文件 → 返回 location
+   ↓
+4. [PostgreSQL] UPDATE documents SET location=?, run=1 (处理中)
+   ↓
+5. [后台任务] 解析 PDF → 生成 chunks
+   ↓
+6. [Elasticsearch] 批量插入 chunks + vectors
+   ↓
+7. [PostgreSQL] UPDATE documents SET run=2, chunk_num=?, progress=1.0
+```
+
+**对话查询流程**：
+```
+1. [用户] 发送问题："什么是 RAG？"
+   ↓
+2. [PostgreSQL] 查询对话配置：
+   SELECT knowledgebase_ids, llm, similarity_threshold
+   FROM conversations WHERE id = ?
+   ↓
+3. [Elasticsearch] 向量搜索相关 chunks
+   ↓
+4. [PostgreSQL] 记录消息：
+   INSERT INTO messages (conversation_id, role, content)
+   ↓
+5. [LLM API] 生成回答
+   ↓
+6. [PostgreSQL] 记录 AI 回答 + 引用信息
+```
+
+##### 📈 监控和维护
+
+**1. 性能监控查询**：
+```sql
+-- 查看慢查询
+SELECT query, mean_time, calls, total_time
+FROM pg_stat_statements
+ORDER BY mean_time DESC LIMIT 10;
+
+-- 查看表大小
+SELECT
+    schemaname,
+    tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as size
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+
+-- 查看索引使用情况
+SELECT
+    schemaname, tablename, indexname, idx_scan, idx_tup_read, idx_tup_fetch
+FROM pg_stat_user_indexes
+ORDER BY idx_scan DESC;
+```
+
+**2. 自动化维护**：
+```sql
+-- 定期清理过期数据
+DELETE FROM messages
+WHERE created_time < NOW() - INTERVAL '90 days'
+AND conversation_id IN (
+    SELECT id FROM conversations WHERE updated_time < NOW() - INTERVAL '30 days'
+);
+
+-- 重建统计信息
+ANALYZE;
+
+-- 清理碎片
+VACUUM ANALYZE;
+```
+
+##### 🚀 高可用部署
+
+**主从复制配置**：
+```yaml
+# docker-compose.yml
+services:
+  postgres-master:
+    image: postgres:15
+    environment:
+      POSTGRES_REPLICATION_MODE: master
+      POSTGRES_REPLICATION_USER: replicator
+      POSTGRES_REPLICATION_PASSWORD: repl_password
+    volumes:
+      - postgres_master_data:/var/lib/postgresql/data
+
+  postgres-slave:
+    image: postgres:15
+    environment:
+      POSTGRES_REPLICATION_MODE: slave
+      POSTGRES_REPLICATION_USER: replicator
+      POSTGRES_REPLICATION_PASSWORD: repl_password
+      POSTGRES_MASTER_HOST: postgres-master
+    depends_on:
+      - postgres-master
+```
+
+**备份策略**：
+```bash
+# 每日全量备份
+pg_dump -h localhost -U postgres -d ragflow > backup_$(date +%Y%m%d).sql
+
+# 实时 WAL 归档（用于时间点恢复）
+archive_command = 'cp %p /backup/wal_archive/%f'
+```
+
+##### 💡 为什么选择 PostgreSQL 而不是 MySQL？
+
+**技术对比**：
+
+| 特性 | PostgreSQL | MySQL | RAGFlow 需求 |
+|-----|-----------|-------|-------------|
+| **JSONB 支持** | ✓ 原生，可索引 | ~ JSON，性能差 | 存储复杂配置 ✓ |
+| **数组类型** | ✓ 原生支持 | ✗ 需要序列化 | 多知识库关联 ✓ |
+| **全文搜索** | ✓ 内置 GIN 索引 | ~ 基础 FULLTEXT | 文档标题搜索 ✓ |
+| **UUID 主键** | ✓ 原生生成 | ~ 需要函数 | 分布式 ID ✓ |
+| **复杂查询** | ✓ 窗口函数、CTE | ~ 基础 SQL | 统计分析 ✓ |
+| **事务隔离** | ✓ 真正的 MVCC | ~ 行锁 | 并发安全 ✓ |
+| **扩展性** | ✓ 丰富插件 | ~ 有限 | 未来扩展 ✓ |
+
+**实际代码证据**：
+```python
+# ragflow/api/db/services/knowledgebase_service.py
+class KnowledgebaseService:
+    @classmethod
+    def get_by_id(cls, kb_id):
+        # 利用 PostgreSQL 的 JSONB 查询
+        return cls.model.select().where(
+            cls.model.id == kb_id,
+            cls.model.parser_config.contains({'status': 'active'})  # JSONB 查询
+        ).first()
+
+    @classmethod
+    def update_parser_config(cls, kb_id, new_config):
+        # PostgreSQL JSONB 合并操作
+        return cls.model.update(
+            parser_config=fn.jsonb_set(
+                cls.model.parser_config,
+                '{chunk_method}',
+                new_config['chunk_method']
+            )
+        ).where(cls.model.id == kb_id).execute()
+```
+
+**结论**：PostgreSQL 为 RAGFlow 提供了 MySQL 无法匹敌的现代数据库特性，特别是在处理复杂配置、多维关联和高并发场景下的优势明显。
+
 ---
 
 ### ⚡ Redis：缓存和会话层
